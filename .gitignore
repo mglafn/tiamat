@@ -1,0 +1,17 @@
+# Environments
+venv/
+.env
+
+# Data
+*.csv
+*.json
+*.sqlite
+*.db
+data
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+repomix-outpul.xml

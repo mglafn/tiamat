@@ -1,0 +1,21 @@
+#  Core Data Processing & Streaming ETL 
+ijson
+pandas
+numpy
+duckdb
+python-dotenv
+requests
+
+#  Machine Learning & Time-Series Forecasting 
+scikit-learn
+xgboost
+statsmodels
+
+#  API Layer & Microservice 
+fastapi
+uvicorn
+pydantic
+
+# Developer Utilities & Testing 
+pytest
+black
