@@ -41,7 +41,6 @@ async def lifespan(app: FastAPI):
     # 2. Establish Persistent DuckDB Connection (Read-Only)
     if DB_PATH.exists():
         try:
-            # Persistent connection is faster than opening/closing on every request
             db_conn = duckdb.connect(str(DB_PATH), read_only=True)
             print(f"[Startup] Persistent Read-Only connection to DuckDB established.")
         except Exception as e:
@@ -62,7 +61,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
     description="Enterprise microservice for querying cross-vendor arbitrage spreads, card portfolio market summaries, and XGBoost price predictions.",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan
 )
 
@@ -104,6 +103,13 @@ class CardMarketSummary(BaseModel):
     predicted_7d_price: float
     predicted_gain_pct: float
 
+class CardSearchResult(BaseModel):
+    uuid: str
+    name: str
+    set_code: str
+    finish: str
+    current_price: float
+
 # ------------------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------------------
@@ -120,6 +126,45 @@ def health_check():
         db_connected=db_conn is not None,
         model_loaded=model_artifact is not None
     )
+
+@app.get("/api/v1/search", response_model=List[CardSearchResult], tags=["Search"])
+def search_card_by_name(
+    name: str = Query(..., min_length=2, description="Partial or full card name to resolve"),
+    limit: int = Query(20, le=100)
+):
+    """
+    Resolves human-readable card names to system UUIDs across all printings (variants).
+    Executes a Star Schema JOIN between dim_cards and fact_training_dataset.
+    """
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    query = """
+        SELECT 
+            d.uuid, 
+            d.name, 
+            d.set_code, 
+            f.finish,
+            f.current_price
+        FROM dim_cards d
+        JOIN fact_training_dataset f ON d.uuid = f.uuid
+        WHERE d.name ILIKE ?
+          AND f.price_date = (SELECT MAX(price_date) FROM fact_training_dataset)
+        ORDER BY f.current_price DESC
+        LIMIT ?
+    """
+    search_term = f"%{name}%"
+    rows = db_conn.execute(query, [search_term, limit]).fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No card printings found matching '{name}'.")
+
+    return [
+        CardSearchResult(
+            uuid=r[0], name=r[1], set_code=r[2],
+            finish=r[3], current_price=round(r[4], 2)
+        ) for r in rows
+    ]
 
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
@@ -138,6 +183,7 @@ def get_arbitrage(
         LIMIT ?
     """
     rows = db_conn.execute(query, [min_spread, limit]).fetchall()
+
     return [
         ArbitrageOpportunity(
             uuid=r[0], price_date=r[1], finish=r[2],
@@ -158,7 +204,6 @@ def get_forecast(
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    # Fetch latest features from warehouse
     query = """
         SELECT current_price, sma_7, sma_30, daily_return_pct
         FROM fact_training_dataset
@@ -166,12 +211,12 @@ def get_forecast(
         ORDER BY price_date DESC LIMIT 1
     """
     row = db_conn.execute(query, [card_uuid, vendor, finish]).fetchone()
+
     if not row:
         raise HTTPException(status_code=404, detail="Card metrics not found for given vendor/finish combination.")
 
     current_price, sma_7, sma_30, daily_return_pct = row
 
-    # Prepare for inference
     input_df = pd.DataFrame([{
         'current_price': current_price,
         'sma_7': sma_7,
@@ -179,7 +224,6 @@ def get_forecast(
         'daily_return_pct': daily_return_pct
     }])
 
-    # Model inference
     model = model_artifact["model"]
     mae = model_artifact["metrics"].get("mae", 0.0)
     pred_price = float(model.predict(input_df)[0])
@@ -204,15 +248,14 @@ def get_card_summary(card_uuid: str):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
 
-    # 1. Fetch latest price date for this card
     date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
     latest_date_row = db_conn.execute(date_query, [card_uuid]).fetchone()
+
     if not latest_date_row or not latest_date_row[0]:
         raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
-    
+
     latest_date = latest_date_row[0]
 
-    # 2. Query aggregate metrics across all variants for the latest date
     agg_query = """
         SELECT 
             COUNT(*) as variant_count,
@@ -225,7 +268,6 @@ def get_card_summary(card_uuid: str):
     agg_row = db_conn.execute(agg_query, [card_uuid, latest_date]).fetchone()
     variant_count, floor_price, avg_price, ceiling_price = agg_row
 
-    # 3. Get primary variant metrics for XGBoost inference
     variant_query = """
         SELECT vendor, finish, current_price, sma_7, sma_30, daily_return_pct
         FROM fact_training_dataset
@@ -236,13 +278,13 @@ def get_card_summary(card_uuid: str):
     v_row = db_conn.execute(variant_query, [card_uuid, latest_date]).fetchone()
     vendor, finish, current_price, sma_7, sma_30, daily_return_pct = v_row
 
-    # 4. XGBoost Inference on primary variant
     input_df = pd.DataFrame([{
         'current_price': current_price,
         'sma_7': sma_7,
         'sma_30': sma_30,
         'daily_return_pct': daily_return_pct
     }])
+
     model = model_artifact["model"]
     pred_price = float(model.predict(input_df)[0])
     gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
