@@ -3,25 +3,32 @@ import requests
 import lzma
 import shutil
 
-url = "https://mtgjson.com/api/v5/AllPrices.json.xz"
-raw_dir = os.path.join("data", "raw")
-compressed_path = os.path.join(raw_dir, "AllPrices.json.xz")
-extracted_path = os.path.join(raw_dir, "AllPrices.json")
+# MTGJSON v5 Raw Feed Endpoints
+URLS = {
+    "AllPrices.json": "https://mtgjson.com/api/v5/AllPrices.json.xz",
+    "cards.csv": "https://mtgjson.com/api/v5/csv/cards.csv.xz"
+}
 
+raw_dir = os.path.join("data", "raw")
 os.makedirs(raw_dir, exist_ok=True)
 
-print("Downloading AllPrices.json.xz from MTGJSON...")
-response = requests.get(url, stream=True)
-with open(compressed_path, "wb") as f:
-    for chunk in response.iter_content(chunk_size=1024*1024):
-        if chunk:
-            f.write(chunk)
+for filename, url in URLS.items():
+    compressed_path = os.path.join(raw_dir, f"{filename}.xz")
+    extracted_path = os.path.join(raw_dir, filename)
 
-print("Decompressing .xz file in memory-efficient chunks...")
-with lzma.open(compressed_path, "rb") as f_in:
-    with open(extracted_path, "wb") as f_out:
-        # Streams the decompression chunk by chunk to prevent RAM spikes
-        shutil.copyfileobj(f_in, f_out, length=1024*1024)
+    print(f"Downloading {filename}.xz from MTGJSON...")
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
 
-os.remove(compressed_path)
-print(f"Success! Uncompressed file ready at: {extracted_path}")
+    with open(compressed_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+
+    print(f"Decompressing {filename}.xz in memory-efficient chunks...")
+    with lzma.open(compressed_path, "rb") as f_in:
+        with open(extracted_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out, length=1024*1024)
+
+    os.remove(compressed_path)
+    print(f"Success! Uncompressed file ready at: {extracted_path}\n")
