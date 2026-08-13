@@ -21,16 +21,17 @@ def compute_financial_indicators(db_path):
                 -- Lagged price for daily return calculation
                 LAG(price, 1) OVER (PARTITION BY uuid, vendor, finish ORDER BY price_date) as prev_price,
                 -- 7-Day Simple Moving Average
+-- 7-Day Simple Moving Average (Interval Aware)
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
                 ) as sma_7,
-                -- 30-Day Simple Moving Average
+                -- 30-Day Simple Moving Average (Interval Aware)
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '29 days' PRECEDING AND CURRENT ROW
                 ) as sma_30
             FROM fact_prices
             WHERE format = 'paper' -- Focus on physical paper cards first
