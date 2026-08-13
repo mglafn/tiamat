@@ -8,59 +8,71 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 # ------------------------------------------------------------------------------
-# Robust Path Resolution (Anchored to Project Root)
+# Robust Path Resolution
 # ------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-# Global state in-memory artifact
+# ------------------------------------------------------------------------------
+# Global State Management
+# ------------------------------------------------------------------------------
 model_artifact = None
+db_conn = None
 
-
-# ------------------------------------------------------------------------------
-# FastAPI Lifespan Context Manager (Modern Startup/Shutdown Handling)
-# ------------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages application lifecycle events. Loads the trained XGBoost model
-    into memory on startup and handles clean shutdown.
+    Handles application startup and shutdown. 
+    Maintains persistent connections to ML models and analytical databases.
     """
-    global model_artifact
+    global model_artifact, db_conn
+
+    # 1. Load XGBoost Model Artifact
     if MODEL_PATH.exists():
         try:
             model_artifact = joblib.load(MODEL_PATH)
             print(f"[Startup] Successfully loaded XGBoost model from: {MODEL_PATH}")
         except Exception as e:
-            print(f"[Startup Error] Failed to load model artifact: {e}")
+            print(f"[Startup Error] Model artifact load failed: {e}")
     else:
-        print(f"[Startup Warning] Model file not found at {MODEL_PATH}. Prediction endpoints will be disabled.")
-    
-    yield  # Application runs while suspended here
-    
-    print("[Shutdown] Cleaning up API resources...")
+        print(f"[Startup Warning] Model artifact not found at {MODEL_PATH}")
 
+    # 2. Establish Persistent DuckDB Connection (Read-Only)
+    if DB_PATH.exists():
+        try:
+            # Persistent connection is faster than opening/closing on every request
+            db_conn = duckdb.connect(str(DB_PATH), read_only=True)
+            print(f"[Startup] Persistent Read-Only connection to DuckDB established.")
+        except Exception as e:
+            print(f"[Startup Error] Database connection failed: {e}")
+    else:
+        print(f"[Startup Warning] DuckDB database not found at {DB_PATH}")
+
+    yield  # API is now serving requests
+
+    # 3. Shutdown: Clean up resources
+    if db_conn:
+        db_conn.close()
+        print("[Shutdown] DuckDB connection closed.")
 
 # ------------------------------------------------------------------------------
 # Application Initialization
 # ------------------------------------------------------------------------------
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
-    description="Enterprise microservice for querying cross-vendor secondary market arbitrage spreads and XGBoost forward price predictions.",
-    version="1.0.0",
+    description="Enterprise microservice for querying cross-vendor arbitrage spreads and XGBoost price predictions.",
+    version="1.1.0",
     lifespan=lifespan
 )
 
-
 # ------------------------------------------------------------------------------
-# Response & Data Schemas
+# Schemas (Pydantic)
 # ------------------------------------------------------------------------------
-class HealthCheckResponse(BaseModel):
+class HealthCheck(BaseModel):
     status: str
-    database_connected: bool
+    db_connected: bool
     model_loaded: bool
-
 
 class ArbitrageOpportunity(BaseModel):
     uuid: str
@@ -71,160 +83,103 @@ class ArbitrageOpportunity(BaseModel):
     price_spread: float
     spread_pct: float
 
-
 class PredictionResponse(BaseModel):
     uuid: str
     vendor: str
     finish: str
     current_price: float
-    sma_7: float
-    sma_30: float
     predicted_7d_price: float
     predicted_gain_pct: float
-
+    model_mae: float
 
 # ------------------------------------------------------------------------------
-# API Endpoints
+# Endpoints
 # ------------------------------------------------------------------------------
-
-@app.get("/health", response_model=HealthCheckResponse, tags=["Health & System"])
+@app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
-    """
-    Verifies that the microservice, persistent database, and ML models are healthy.
-    """
-    db_status = DB_PATH.exists()
-    return HealthCheckResponse(
+    """System heartbeat verifying model and database health."""
+    return HealthCheck(
         status="healthy",
-        database_connected=db_status,
+        db_connected=db_conn is not None,
         model_loaded=model_artifact is not None
     )
 
-
-@app.get(
-    "/api/v1/arbitrage", 
-    response_model=List[ArbitrageOpportunity], 
-    tags=["Arbitrage Analytics"]
-)
-def get_arbitrage_opportunities(
-    min_spread: float = Query(2.00, ge=0.50, description="Minimum dollar price spread between vendors"),
-    limit: int = Query(50, ge=1, le=500, description="Maximum number of records to return")
+@app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
+def get_arbitrage(
+    min_spread: float = Query(2.00, description="Minimum dollar spread threshold"),
+    limit: int = Query(50, le=500)
 ):
+    """Retrieves real-time arbitrage spreads between TCGPlayer and CardKingdom."""
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    query = """
+        SELECT uuid, CAST(price_date AS VARCHAR), finish, tcg_price, ck_price, price_spread, spread_pct
+        FROM fact_arbitrage_opportunities
+        WHERE price_spread >= ?
+        ORDER BY price_spread DESC
+        LIMIT ?
     """
-    Queries DuckDB for real-time cross-vendor price discrepancies (e.g., TCGPlayer vs CardKingdom) 
-    where the spread exceeds the requested threshold.
-    """
-    if not DB_PATH.exists():
-        raise HTTPException(status_code=500, detail="Database file not initialized. Run ETL pipelines first.")
+    # Use the global persistent connection
+    rows = db_conn.execute(query, [min_spread, limit]).fetchall()
 
-    conn = duckdb.connect(str(DB_PATH), read_only=True)
-    try:
-        query = """
-            SELECT 
-                uuid, 
-                CAST(price_date AS VARCHAR) as price_date, 
-                finish, 
-                tcg_price, 
-                ck_price, 
-                price_spread, 
-                spread_pct
-            FROM fact_arbitrage_opportunities
-            WHERE price_spread >= ?
-            ORDER BY price_spread DESC
-            LIMIT ?
-        """
-        results = conn.execute(query, [min_spread, limit]).fetchall()
-    finally:
-        conn.close()
+    return [
+        ArbitrageOpportunity(
+            uuid=r[0], price_date=r[1], finish=r[2],
+            tcg_price=round(r[3], 2), ck_price=round(r[4], 2),
+            price_spread=round(r[5], 2), spread_pct=round(r[6], 2)
+        ) for r in rows
+    ]
 
-    output = []
-    for row in results:
-        output.append(ArbitrageOpportunity(
-            uuid=row[0],
-            price_date=str(row[1]),
-            finish=row[2],
-            tcg_price=round(row[3], 2),
-            ck_price=round(row[4], 2),
-            price_spread=round(row[5], 2),
-            spread_pct=round(row[6], 2)
-        ))
-    
-    return output
-
-
-@app.get(
-    "/api/v1/forecast/{card_uuid}", 
-    response_model=PredictionResponse, 
-    tags=["Predictive Analytics"]
-)
-def forecast_card_price(
-    card_uuid: str, 
-    vendor: str = Query("tcgplayer", description="Target vendor marketplace"), 
-    finish: str = Query("nonfoil", description="Card printing finish (nonfoil/foil/etched)")
+@app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
+def get_forecast(
+    card_uuid: str,
+    vendor: str = Query("tcgplayer"),
+    finish: str = Query("nonfoil")
 ):
-    """
-    Retrieves latest financial metrics for a card and runs XGBoost inference 
-    to predict 7-day forward price movement.
-    """
+    """Inference endpoint serving XGBoost 7-day forward price predictions."""
     if not model_artifact:
-        raise HTTPException(
-            status_code=503, 
-            detail="ML Forecasting model unavailable. Train model first via src/analytics/train_forecast.py."
-        )
-    
-    if not DB_PATH.exists():
-        raise HTTPException(status_code=500, detail="Database file not initialized.")
+        raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    conn = duckdb.connect(str(DB_PATH), read_only=True)
-    try:
-        query = """
-            SELECT current_price, sma_7, sma_30, daily_return_pct
-            FROM fact_training_dataset
-            WHERE uuid = ? AND vendor = ? AND finish = ?
-            ORDER BY price_date DESC
-            LIMIT 1
-        """
-        row = conn.execute(query, [card_uuid, vendor, finish]).fetchone()
-    finally:
-        conn.close()
+    # Fetch latest features from warehouse
+    query = """
+        SELECT current_price, sma_7, sma_30, daily_return_pct
+        FROM fact_training_dataset
+        WHERE uuid = ? AND vendor = ? AND finish = ?
+        ORDER BY price_date DESC LIMIT 1
+    """
+    row = db_conn.execute(query, [card_uuid, vendor, finish]).fetchone()
 
     if not row:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Card metrics for UUID '{card_uuid}' ({vendor}/{finish}) not found in data warehouse."
-        )
+        raise HTTPException(status_code=404, detail="Card metrics not found.")
 
     current_price, sma_7, sma_30, daily_return_pct = row
 
-    # Construct input dataframe matching exact feature names used during model training
-    features_df = pd.DataFrame([{
+    # Prepare for inference
+    input_df = pd.DataFrame([{
         'current_price': current_price,
         'sma_7': sma_7,
         'sma_30': sma_30,
         'daily_return_pct': daily_return_pct
     }])
 
-    # Execute XGBoost inference
+    # Model inference
     model = model_artifact["model"]
-    pred_price = float(model.predict(features_df)[0])
+    mae = model_artifact["metrics"].get("mae", 0.0)
+    pred_price = float(model.predict(input_df)[0])
     
-    # Calculate percentage growth forecast
-    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0.0
+    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
 
     return PredictionResponse(
-        uuid=card_uuid,
-        vendor=vendor,
-        finish=finish,
+        uuid=card_uuid, vendor=vendor, finish=finish,
         current_price=round(current_price, 2),
-        sma_7=round(sma_7, 2),
-        sma_30=round(sma_30, 2),
         predicted_7d_price=round(pred_price, 2),
-        predicted_gain_pct=round(gain_pct, 2)
+        predicted_gain_pct=round(gain_pct, 2),
+        model_mae=round(mae, 4)
     )
 
-
-# ------------------------------------------------------------------------------
-# Entrypoint for direct script execution
-# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
