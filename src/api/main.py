@@ -5,6 +5,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 # ------------------------------------------------------------------------------
@@ -27,7 +28,6 @@ async def lifespan(app: FastAPI):
     Maintains persistent connections to ML models and analytical databases.
     """
     global model_artifact, db_conn
-
     # 1. Load XGBoost Model Artifact
     if MODEL_PATH.exists():
         try:
@@ -61,8 +61,8 @@ async def lifespan(app: FastAPI):
 # ------------------------------------------------------------------------------
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
-    description="Enterprise microservice for querying cross-vendor arbitrage spreads and XGBoost price predictions.",
-    version="1.1.0",
+    description="Enterprise microservice for querying cross-vendor arbitrage spreads, card portfolio market summaries, and XGBoost price predictions.",
+    version="1.2.0",
     lifespan=lifespan
 )
 
@@ -92,9 +92,26 @@ class PredictionResponse(BaseModel):
     predicted_gain_pct: float
     model_mae: float
 
+class CardMarketSummary(BaseModel):
+    uuid: str
+    latest_price_date: str
+    total_market_variants: int
+    floor_price: float
+    avg_price: float
+    ceiling_price: float
+    primary_vendor: str
+    primary_finish: str
+    predicted_7d_price: float
+    predicted_gain_pct: float
+
 # ------------------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------------------
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirects root URL requests automatically to interactive Swagger API docs."""
+    return RedirectResponse(url="/docs")
+
 @app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
     """System heartbeat verifying model and database health."""
@@ -120,9 +137,7 @@ def get_arbitrage(
         ORDER BY price_spread DESC
         LIMIT ?
     """
-    # Use the global persistent connection
     rows = db_conn.execute(query, [min_spread, limit]).fetchall()
-
     return [
         ArbitrageOpportunity(
             uuid=r[0], price_date=r[1], finish=r[2],
@@ -151,9 +166,8 @@ def get_forecast(
         ORDER BY price_date DESC LIMIT 1
     """
     row = db_conn.execute(query, [card_uuid, vendor, finish]).fetchone()
-
     if not row:
-        raise HTTPException(status_code=404, detail="Card metrics not found.")
+        raise HTTPException(status_code=404, detail="Card metrics not found for given vendor/finish combination.")
 
     current_price, sma_7, sma_30, daily_return_pct = row
 
@@ -169,7 +183,6 @@ def get_forecast(
     model = model_artifact["model"]
     mae = model_artifact["metrics"].get("mae", 0.0)
     pred_price = float(model.predict(input_df)[0])
-    
     gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
 
     return PredictionResponse(
@@ -178,6 +191,73 @@ def get_forecast(
         predicted_7d_price=round(pred_price, 2),
         predicted_gain_pct=round(gain_pct, 2),
         model_mae=round(mae, 4)
+    )
+
+@app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
+def get_card_summary(card_uuid: str):
+    """
+    Card Portfolio Summary: Aggregates floor, ceiling, and average market prices across 
+    all vendor/finish variants for a given card UUID and runs ML inference on its primary variant.
+    """
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    if not model_artifact:
+        raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
+
+    # 1. Fetch latest price date for this card
+    date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
+    latest_date_row = db_conn.execute(date_query, [card_uuid]).fetchone()
+    if not latest_date_row or not latest_date_row[0]:
+        raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
+    
+    latest_date = latest_date_row[0]
+
+    # 2. Query aggregate metrics across all variants for the latest date
+    agg_query = """
+        SELECT 
+            COUNT(*) as variant_count,
+            MIN(current_price) as floor_price,
+            AVG(current_price) as avg_price,
+            MAX(current_price) as ceiling_price
+        FROM fact_training_dataset
+        WHERE uuid = ? AND price_date = ?
+    """
+    agg_row = db_conn.execute(agg_query, [card_uuid, latest_date]).fetchone()
+    variant_count, floor_price, avg_price, ceiling_price = agg_row
+
+    # 3. Get primary variant metrics for XGBoost inference
+    variant_query = """
+        SELECT vendor, finish, current_price, sma_7, sma_30, daily_return_pct
+        FROM fact_training_dataset
+        WHERE uuid = ? AND price_date = ?
+        ORDER BY current_price DESC
+        LIMIT 1
+    """
+    v_row = db_conn.execute(variant_query, [card_uuid, latest_date]).fetchone()
+    vendor, finish, current_price, sma_7, sma_30, daily_return_pct = v_row
+
+    # 4. XGBoost Inference on primary variant
+    input_df = pd.DataFrame([{
+        'current_price': current_price,
+        'sma_7': sma_7,
+        'sma_30': sma_30,
+        'daily_return_pct': daily_return_pct
+    }])
+    model = model_artifact["model"]
+    pred_price = float(model.predict(input_df)[0])
+    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
+
+    return CardMarketSummary(
+        uuid=card_uuid,
+        latest_price_date=str(latest_date),
+        total_market_variants=variant_count,
+        floor_price=round(floor_price, 2),
+        avg_price=round(avg_price, 2),
+        ceiling_price=round(ceiling_price, 2),
+        primary_vendor=vendor,
+        primary_finish=finish,
+        predicted_7d_price=round(pred_price, 2),
+        predicted_gain_pct=round(gain_pct, 2)
     )
 
 if __name__ == "__main__":
