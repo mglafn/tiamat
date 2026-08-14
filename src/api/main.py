@@ -204,8 +204,8 @@ def get_arbitrage(
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
     card_uuid: str,
-    vendor: str = Query("tcgplayer"),
-    finish: str = Query("nonfoil")
+    vendor: str = Query("tcgplayer", description="Vendor name (e.g., tcgplayer, cardkingdom)"),
+    finish: str = Query("normal", description="Finish type: 'normal' or 'foil'")
 ):
     """Inference endpoint serving XGBoost 7-day forward price predictions."""
     if not model_artifact:
@@ -213,19 +213,27 @@ def get_forecast(
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
+    # Schema normalization: map 'nonfoil' alias to MTGJSON's 'normal'
+    normalized_finish = "normal" if finish.lower() in ["nonfoil", "regular"] else finish.lower()
+
+    # Fetch latest features from warehouse
     query = """
         SELECT current_price, sma_7, sma_30, daily_return_pct
         FROM fact_training_dataset
         WHERE uuid = ? AND vendor = ? AND finish = ?
         ORDER BY price_date DESC LIMIT 1
     """
-    row = db_conn.execute(query, [card_uuid, vendor, finish]).fetchone()
+    row = db_conn.execute(query, [card_uuid, vendor.lower(), normalized_finish]).fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Card metrics not found for given vendor/finish combination.")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Card metrics not found for vendor '{vendor}' with finish '{finish}'."
+        )
 
     current_price, sma_7, sma_30, daily_return_pct = row
 
+    # Prepare for inference
     input_df = pd.DataFrame([{
         'current_price': current_price,
         'sma_7': sma_7,
@@ -233,19 +241,21 @@ def get_forecast(
         'daily_return_pct': daily_return_pct
     }])
 
+    # Model inference
     model = model_artifact["model"]
     mae = model_artifact["metrics"].get("mae", 0.0)
     pred_price = float(model.predict(input_df)[0])
     gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
 
     return PredictionResponse(
-        uuid=card_uuid, vendor=vendor, finish=finish,
+        uuid=card_uuid, 
+        vendor=vendor, 
+        finish=normalized_finish,
         current_price=round(current_price, 2),
         predicted_7d_price=round(pred_price, 2),
         predicted_gain_pct=round(gain_pct, 2),
         model_mae=round(mae, 4)
     )
-
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
 def get_card_summary(card_uuid: str):
     """
