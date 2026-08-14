@@ -99,7 +99,7 @@ export function CommandPalette({
           {!isLoading &&
             results.map((r, i) => (
               <button
-                key={r.uuid}
+                key={`${r.uuid}-${r.finish}-${i}`} // 👈 UPDATE THIS LINE
                 type="button"
                 onMouseEnter={() => setActive(i)}
                 onClick={() => {

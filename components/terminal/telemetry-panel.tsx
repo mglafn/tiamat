@@ -2,9 +2,7 @@
 
 import { useSummary, useForecast, usePrintings } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
-import { Layers } from "lucide-react"
 import type { CardVariant } from "@/lib/types"
-
 
 interface TelemetryPanelProps {
   uuid: string | null
@@ -25,35 +23,36 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
   const { data: summary } = useSummary(uuid)
   const { data: forecast } = useForecast(uuid, "tcgplayer", selectedFinish)
   const { printings } = usePrintings(uuid)
-  
+
   // Hydrate directly from summary payload
   const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const setCode = summary?.set_code ?? "—"
   const collectorNum = summary?.collector_number ? `#${summary.collector_number}` : ""
   const edhrecRank = summary?.edhrec_rank
 
-  // Distribution bar: floor -> avg -> ceiling positioning.
+  // Distribution bar: floor -> avg -> ceiling positioning
   const hasValidPriceRange =
     summary != null &&
     summary.floor_price != null &&
     summary.ceiling_price != null &&
     summary.ceiling_price > 0
 
-  const dist = hasValidPriceRange && summary
-    ? {
-        floorPos: 0,
-        avgPos: Math.min(
-          100,
-          Math.max(
-            0,
-            ((summary.avg_price - summary.floor_price) /
-              Math.max(summary.ceiling_price - summary.floor_price, 0.01)) *
-              100
-          )
-        ),
-        ceilPos: 100,
-      }
-    : null
+  const dist =
+    hasValidPriceRange && summary
+      ? {
+          floorPos: 0,
+          avgPos: Math.min(
+            100,
+            Math.max(
+              0,
+              ((summary.avg_price - summary.floor_price) /
+                Math.max(summary.ceiling_price - summary.floor_price, 0.01)) *
+                100
+            )
+          ),
+          ceilPos: 100,
+        }
+      : null
 
   return (
     <section className="flex min-h-0 flex-col border-l border-border-strong bg-panel" aria-label="Execution telemetry">
@@ -72,7 +71,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 <span>Selected SKU</span>
                 {collectorNum && <span className="font-mono text-dim">{collectorNum}</span>}
               </div>
-              <div className="mt-0.5 text-[13px] text-accent text-pretty font-medium">{name}</div>
+              <div className="mt-0.5 text-pretty text-[13px] font-medium text-accent">{name}</div>
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                 <div className="flex justify-between">
                   <span className="text-dim">Finish</span>
@@ -80,7 +79,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 </div>
                 <div className="flex justify-between">
                   <span className="text-dim">Active Set</span>
-                  <span className="text-foreground font-semibold">{setCode}</span>
+                  <span className="font-semibold text-foreground">{setCode}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-dim">Vendor</span>
@@ -92,8 +91,8 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 </div>
                 {edhrecRank != null && (
                   <div className="col-span-2 mt-1 flex items-center justify-between border-t border-border/40 pt-1 text-[10px]">
-                    <span className="text-dim uppercase">Demand Rank</span>
-                    <span className="font-mono text-up font-semibold">#{edhrecRank.toLocaleString()} (EDHREC)</span>
+                    <span className="uppercase text-dim">Demand Rank</span>
+                    <span className="font-mono font-semibold text-up">#{edhrecRank.toLocaleString()} (EDHREC)</span>
                   </div>
                 )}
               </div>
@@ -103,25 +102,22 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
             {printings.length > 0 && (
               <div className="mt-3">
                 <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
-                  <span className="flex items-center gap-1">
-                    <Layers className="h-3 w-3 text-accent" />
-                    Market Prints ({printings.length})
-                  </span>
-                  <span>Floor USD</span>
+                  <span>Available Printings</span>
+                  <span className="tnum">{printings.length} variants</span>
                 </div>
-                <div className="max-h-40 overflow-y-auto rounded-sm border border-border bg-surface/60 divide-y divide-border/40">
-                  {printings.map((p: CardVariant) => {
+                <div className="max-h-40 overflow-y-auto divide-y divide-border/40 rounded-sm border border-border bg-surface/60">
+                  {printings.map((p: CardVariant, i: number) => {
                     const isActive = p.uuid === uuid
                     const hasPrice = p.floor_price != null
 
                     return (
                       <button
-                        key={p.uuid}
+                        key={`${p.uuid}-${p.set_code}-${i}`}
                         type="button"
                         onClick={() => onSelectUuid?.(p.uuid)}
                         className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-[11px] transition-colors ${
                           isActive
-                            ? "bg-accent/20 text-accent font-semibold border-l-2 border-accent"
+                            ? "border-l-2 border-accent bg-accent/20 font-semibold text-accent"
                             : "text-foreground hover:bg-surface-2"
                         }`}
                       >
@@ -131,7 +127,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                           </span>
                           <span className="font-semibold">{p.set_code}</span>
                           {p.edhrec_rank != null && (
-                            <span className="hidden sm:inline text-[9px] text-muted-foreground font-mono">
+                            <span className="hidden font-mono text-[9px] text-muted-foreground sm:inline">
                               (r:{p.edhrec_rank})
                             </span>
                           )}
@@ -141,7 +137,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                         {hasPrice ? (
                           <span
                             className={`tnum font-mono text-[11px] ${
-                              p.floor_price === 0 ? "text-muted-foreground" : "text-foreground font-medium"
+                              p.floor_price === 0 ? "text-muted-foreground" : "font-medium text-foreground"
                             }`}
                           >
                             {usd(p.floor_price)}
@@ -167,7 +163,10 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                     className="absolute inset-y-0 rounded-full bg-accent/40"
                     style={{ left: 0, right: `${100 - dist.avgPos}%` }}
                   />
-                  <div className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 bg-accent" style={{ left: `calc(${dist.avgPos}% - 1px)` }} />
+                  <div
+                    className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 bg-accent"
+                    style={{ left: `calc(${dist.avgPos}% - 1px)` }}
+                  />
                 </div>
                 <div className="mt-2">
                   <Row label="Vendor Floor" value={usd(summary.floor_price)} tone="text-down" />
@@ -177,7 +176,10 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                     label="Spread"
                     value={
                       summary.floor_price != null && summary.floor_price > 0 && summary.ceiling_price != null
-                        ? `${usd(summary.ceiling_price - summary.floor_price)} · ${pct(((summary.ceiling_price - summary.floor_price) / summary.floor_price) * 100, false)}`
+                        ? `${usd(summary.ceiling_price - summary.floor_price)} · ${pct(
+                            ((summary.ceiling_price - summary.floor_price) / summary.floor_price) * 100,
+                            false
+                          )}`
                         : "—"
                     }
                     tone="text-warn"
@@ -207,11 +209,15 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 <div className="flex items-center justify-between text-[10px] uppercase">
                   <span className="text-dim">Signal</span>
                   <span className={forecast.predicted_gain_pct >= 0 ? "text-up" : "text-down"}>
-                    {forecast.predicted_gain_pct >= 5 ? "STRONG BUY" : forecast.predicted_gain_pct >= 0 ? "ACCUMULATE" : "REDUCE"}
+                    {forecast.predicted_gain_pct >= 5
+                      ? "STRONG BUY"
+                      : forecast.predicted_gain_pct >= 0
+                        ? "ACCUMULATE"
+                        : "REDUCE"}
                   </span>
                 </div>
                 <p className="mt-1 text-[10px] leading-relaxed text-dim">
-                  {"7-day forward projection derived from SMA-7/SMA-30 momentum and daily-return features."}
+                  7-day forward projection derived from SMA-7/SMA-30 momentum and daily-return features.
                 </p>
               </div>
             )}
