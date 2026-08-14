@@ -388,4 +388,4 @@ def get_card_summary(card_uuid: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.api.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("src.api.main:app", host="127.0.0.1", port=8000, reload=True, app_dir=str(BASE_DIR))
