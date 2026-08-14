@@ -1,10 +1,10 @@
 "use client"
 import { useEffect, useMemo, useRef } from "react"
-import { ArrowUp, Loader2, RefreshCw, Star } from "lucide-react"
+import { AlertCircle, ArrowUp, Loader2, RefreshCw, Star } from "lucide-react"
 import { useArbitrage, useCatalog } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
 
-const SPREAD_OPTIONS = [2.5, 5, 10, 20]
+const SPREAD_OPTIONS = [0, 2.5, 5, 10, 20]
 const FINISH_OPTIONS = ["all", "normal", "foil"] as const
 
 export function ArbitrageBook({
@@ -22,7 +22,7 @@ export function ArbitrageBook({
   selectedUuid: string | null
   onSelect: (uuid: string) => void
 }) {
-  const { rows, isLoading, isValidating } = useArbitrage(minSpread, finish)
+  const { rows, error, isLoading, isValidating } = useArbitrage(minSpread, finish)
   const catalog = useCatalog()
   const listRef = useRef<HTMLDivElement>(null)
   const selectedIndex = useMemo(() => rows.findIndex((r) => r.uuid === selectedUuid), [rows, selectedUuid])
@@ -54,12 +54,16 @@ export function ArbitrageBook({
     el?.scrollIntoView({ block: "nearest" })
   }, [selectedUuid])
 
-  return (
+ return (
     <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Arbitrage Order Book</h2>
-        {isLoading && rows.length === 0 ? (
+        {error ? (
+          <span className="flex items-center gap-1.5 text-[10px] text-down">
+            <AlertCircle className="h-3 w-3" /> BROKEN
+          </span>
+        ) : isLoading && rows.length === 0 ? (
           <span className="flex items-center gap-1.5 text-[10px] text-accent">
             <Loader2 className="h-3 w-3 animate-spin" /> FETCHING
           </span>
@@ -121,20 +125,23 @@ export function ArbitrageBook({
 
       {/* Rows */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
-        {isLoading && rows.length === 0 && (
+        {isLoading && rows.length === 0 && !error && (
           <div className="space-y-1.5 p-3">
             {Array.from({ length: 8 }).map((_, i) => (
               <div key={i} className="flex h-6 animate-pulse items-center gap-2 rounded-sm bg-surface-2/60 px-2" />
             ))}
           </div>
         )}
-
-        {!isLoading && rows.length === 0 && (
+        {error && rows.length === 0 && (
+          <div className="p-4 text-center text-[11px] text-down">
+            Connection failed. Unable to fetch arbitrage order book.
+          </div>
+        )}
+        {!isLoading && !error && rows.length === 0 && (
           <div className="p-4 text-center text-[11px] text-dim">
             No cross-vendor spreads matching &gt;= ${minSpread.toFixed(2)}. Lower the spread threshold or adjust finish filter.
           </div>
         )}
-
         {rows.map((r, i) => {
           const meta = catalog.get(r.uuid)
           const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)

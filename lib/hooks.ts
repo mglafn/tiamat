@@ -1,3 +1,4 @@
+// lib/hooks.ts
 "use client"
 import useSWR from "swr"
 import type {
@@ -10,13 +11,9 @@ import type {
 } from "./types"
 
 const fetcher = async (url: string) => {
-  try {
-    const res = await fetch(url)
-    if (!res.ok) return null
-    return await res.json()
-  } catch {
-    return null
-  }
+  const res = await fetch(url)
+  if (!res.ok) throw new Error("Failed to fetch")
+  return await res.json()
 }
 
 export type HealthPayload = HealthCheck & { source: "live" | "mock" }
@@ -30,7 +27,7 @@ export function useHealth() {
 }
 
 export function useArbitrage(minSpread: number, finish: string) {
-  const { data, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(
+  const { data, error, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(
     `/api/arbitrage?min_spread=${minSpread}&limit=100`,
     fetcher,
     {
@@ -51,27 +48,27 @@ export function useArbitrage(minSpread: number, finish: string) {
       rows.push(r)
     }
   }
-  return { rows, isLoading, isValidating, mutate }
+  return { rows, error, isLoading, isValidating, mutate }
 }
 
 export function useForecast(uuid: string | null, vendor: string, finish: string) {
   const key = uuid ? `/api/forecast/${uuid}?vendor=${vendor}&finish=${finish}` : null
-  const { data, isLoading, isValidating, mutate } = useSWR<PredictionResponse>(key, fetcher, {
+  const { data, error, isLoading, isValidating, mutate } = useSWR<PredictionResponse>(key, fetcher, {
     revalidateOnFocus: false,
     keepPreviousData: false,
     dedupingInterval: 5000,
   })
-  return { data, isLoading, isValidating, mutate }
+  return { data, error, isLoading, isValidating, mutate }
 }
 
 export function useSummary(uuid: string | null) {
   const key = uuid ? `/api/card/summary/${uuid}` : null
-  const { data, isLoading, isValidating, mutate } = useSWR<CardMarketSummary>(key, fetcher, {
+  const { data, error, isLoading, isValidating, mutate } = useSWR<CardMarketSummary>(key, fetcher, {
     revalidateOnFocus: false,
     keepPreviousData: false,
     dedupingInterval: 5000,
   })
-  return { data, isLoading, isValidating, mutate }
+  return { data, error, isLoading, isValidating, mutate }
 }
 
 export function useSearch(query: string) {

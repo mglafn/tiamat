@@ -10,10 +10,10 @@ import { CommandPalette } from "./command-palette"
 
 export function Terminal() {
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
-  const [minSpread, setMinSpread] = useState(2.5)
+  const [minSpread, setMinSpread] = useState(0) // Default to 0 so the whole catalogue is instantly visible
   const [finish, setFinish] = useState("all")
   const [paletteOpen, setPaletteOpen] = useState(false)
-
+  
   // Global ⌘K / Ctrl+K to open search
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

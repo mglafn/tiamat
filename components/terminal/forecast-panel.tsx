@@ -17,11 +17,14 @@ const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"] as const
 export function ForecastPanel({ uuid }: { uuid: string | null }) {
   const [finish, setFinish] = useState<string>("normal")
   const [vendor, setVendor] = useState<string>("tcgplayer")
-  const { data: forecast, isLoading: forecastLoading } = useForecast(uuid, vendor, finish)
-  const { data: summary, isLoading: summaryLoading } = useSummary(uuid)
+  
+  const { data: forecast, error: forecastError, isLoading: forecastLoading } = useForecast(uuid, vendor, finish)
+  const { data: summary, error: summaryError, isLoading: summaryLoading } = useSummary(uuid)
   const catalog = useCatalog()
-
+  
   const isLoading = forecastLoading || summaryLoading
+  const isError = forecastError || summaryError
+
 
   const points = useMemo<DriftPoint[]>(() => {
     if (!uuid || !forecast) return []
@@ -91,11 +94,15 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
           )}
         </div>
         <div className="flex items-center gap-2 text-[10px] uppercase">
-          {isLoading && (
+          {isError ? (
+            <span className="flex items-center gap-1 font-mono text-down">
+              ERROR
+            </span>
+          ) : isLoading ? (
             <span className="flex items-center gap-1 font-mono text-accent">
               <Loader2 className="h-3 w-3 animate-spin" /> INFERRING
             </span>
-          )}
+          ) : null}
           <div className="flex overflow-hidden rounded-sm border border-border">
             {VENDORS.map((v) => (
               <button
@@ -123,7 +130,6 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
         </div>
       </div>
 
-      {/* Chart Canvas Area */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center p-2">
         {!uuid && (
           <div className="flex flex-col items-center justify-center gap-2 text-center text-dim">
@@ -131,16 +137,20 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
             <span className="text-[11px]">Select an asset from the order book or press ⌘K to search</span>
           </div>
         )}
-
-        {uuid && (isLoading || !geom) && (
+        {uuid && isError && (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-down">Inference Error</span>
+            <span className="text-[10px] text-dim">Failed to fetch forecast from service</span>
+          </div>
+        )}
+        {uuid && (isLoading || !geom) && !isError && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
             <Loader2 className="h-6 w-6 animate-spin text-accent" />
             <span className="font-mono text-[11px] uppercase tracking-wider text-accent">Running XGBoost 7-Day Inference…</span>
             <span className="text-[10px] text-dim">Synthesizing SMA-7/30 momentum and DuckDB historical drift</span>
           </div>
         )}
-
-        {uuid && !isLoading && geom && (
+        {uuid && !isLoading && !isError && geom && (
           <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price drift and forecast chart">
             {/* Gridlines */}
             {geom.yTicks.map((t, i) => (
