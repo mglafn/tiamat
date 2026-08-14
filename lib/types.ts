@@ -8,6 +8,8 @@ export interface HealthCheck {
 
 export interface ArbitrageOpportunity {
   uuid: string
+  name?: string
+  set_code?: string
   price_date: string
   finish: string
   tcg_price: number
