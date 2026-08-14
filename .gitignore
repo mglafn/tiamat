@@ -8,6 +8,7 @@ __v0_jsx-dev-runtime.ts
 
 # Environment variables
 .env*.local
+.env
 
 # Common ignores
 node_modules
@@ -16,3 +17,5 @@ node_modules
 *.pyc
 /data
 repomix-output.xml
+
+
