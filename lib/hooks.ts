@@ -1,6 +1,7 @@
 // lib/hooks.ts
 "use client"
 import useSWR from "swr"
+import { apiClient } from "./api-client"
 import type {
   ArbitrageOpportunity,
   CardMarketSummary,
@@ -11,16 +12,10 @@ import type {
   PredictionResponse,
 } from "./types"
 
-const fetcher = async (url: string) => {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error("Failed to fetch")
-  return await res.json()
-}
-
 export type HealthPayload = HealthCheck & { source: "live" | "mock" }
 
 export function useHealth() {
-  return useSWR<HealthPayload>("/api/health", fetcher, {
+  return useSWR<HealthPayload>("health-status", () => apiClient.getHealth(), {
     refreshInterval: 10000,
     revalidateOnFocus: false,
     keepPreviousData: true,
@@ -29,19 +24,21 @@ export function useHealth() {
 
 export function useArbitrage(minSpread: number, finish: string) {
   const { data, error, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(
-    `/api/arbitrage?min_spread=${minSpread}&limit=100`,
-    fetcher,
+    [`arbitrage-book`, minSpread],
+    () => apiClient.getArbitrage(minSpread),
     {
       refreshInterval: 20000,
       revalidateOnFocus: false,
       keepPreviousData: true,
       dedupingInterval: 10000,
-    },
+    }
   )
-  const rawRows = data ?? []
-  const filtered = rawRows.filter((r) => finish === "all" || r.finish === finish)
+
+  const rawRows: ArbitrageOpportunity[] = data ?? []
+  const filtered = rawRows.filter((r: ArbitrageOpportunity) => finish === "all" || r.finish === finish)
   const seen = new Set<string>()
   const rows: ArbitrageOpportunity[] = []
+  
   for (const r of filtered) {
     const key = `${r.uuid}-${r.finish}`
     if (!seen.has(key)) {
@@ -49,51 +46,63 @@ export function useArbitrage(minSpread: number, finish: string) {
       rows.push(r)
     }
   }
+
   return { rows, error, isLoading, isValidating, mutate }
 }
 
 export function useForecast(uuid: string | null, vendor: string, finish: string) {
-  const key = uuid ? `/api/forecast/${uuid}?vendor=${vendor}&finish=${finish}` : null
-  const { data, error, isLoading, isValidating, mutate } = useSWR<PredictionResponse>(key, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: false,
-    dedupingInterval: 5000,
-  })
-  return { data, error, isLoading, isValidating, mutate }
+  return useSWR<PredictionResponse | null>(
+    uuid ? [`forecast`, uuid, vendor, finish] : null,
+    () => (uuid ? apiClient.getForecast(uuid, vendor, finish) : null),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: false,
+      dedupingInterval: 5000,
+    }
+  )
 }
 
 export function useSummary(uuid: string | null) {
-  const key = uuid ? `/api/card/summary/${uuid}` : null
-  const { data, error, isLoading, isValidating, mutate } = useSWR<CardMarketSummary>(key, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: false,
-    dedupingInterval: 5000,
-  })
-  return { data, error, isLoading, isValidating, mutate }
+  return useSWR<CardMarketSummary | null>(
+    uuid ? [`summary`, uuid] : null,
+    () => (uuid ? apiClient.getSummary(uuid) : null),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: false,
+      dedupingInterval: 5000,
+    }
+  )
 }
 
 export function usePrintings(uuid: string | null) {
-  const key = uuid ? `/api/card/printings/${uuid}` : null
-  const { data, error, isLoading } = useSWR<CardVariant[]>(key, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: true,
-  })
+  const { data, error, isLoading } = useSWR<CardVariant[]>(
+    uuid ? [`printings`, uuid] : null,
+    () => (uuid ? apiClient.getPrintings(uuid) : []),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    }
+  )
   return { printings: data ?? [], error, isLoading }
 }
 
 export function useSearch(query: string) {
-  const key = query.trim().length >= 2 ? `/api/search?name=${encodeURIComponent(query.trim())}` : null
-  return useSWR<CardSearchResult[]>(key, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: true,
-  })
+  return useSWR<CardSearchResult[]>(
+    query.trim().length >= 2 ? [`search`, query.trim()] : null,
+    () => apiClient.searchCards(query.trim()),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    }
+  )
 }
 
 export function useCatalog() {
-  const { data } = useSWR<{ source: string; cards: CatalogCard[] }>("/api/catalog", fetcher, {
+  const { data } = useSWR<{ source: string; cards: CatalogCard[] }>("catalog-map", () => apiClient.getCatalog(), {
     revalidateOnFocus: false,
     keepPreviousData: true,
   })
+  
   const map = new Map<string, CatalogCard>()
   for (const c of data?.cards ?? []) map.set(c.uuid, c)
   return map

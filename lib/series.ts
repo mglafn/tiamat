@@ -1,3 +1,4 @@
+// lib/series.ts
 import type { CardMarketSummary, PredictionResponse } from "./types"
 
 function hashSeed(str: string): number {
@@ -8,6 +9,7 @@ function hashSeed(str: string): number {
   }
   return h >>> 0
 }
+
 function mulberry32(seed: number) {
   let a = seed
   return () => {
@@ -36,7 +38,11 @@ const FWD_DAYS = 7
 // Reconstructs a plausible historical drift curve from the documented API
 // fields (current price + SMA anchors), then projects the XGBoost 7-day
 // forward path with a widening ±MAE uncertainty corridor.
-export function buildDrift(uuid: string, forecast: PredictionResponse, summary?: CardMarketSummary): DriftPoint[] {
+export function buildDrift(
+  uuid: string,
+  forecast: PredictionResponse,
+  summary?: CardMarketSummary | null
+): DriftPoint[] {
   const rnd = mulberry32(hashSeed(uuid + "drift"))
   const current = forecast.current_price
   const floor = summary?.floor_price ?? current * 0.9
@@ -84,7 +90,6 @@ export function buildDrift(uuid: string, forecast: PredictionResponse, summary?:
 
   // Forward XGBoost path: interpolate current -> predicted_7d_price.
   const target = forecast.predicted_7d_price
-  // Visible corridor derived from model MAE, widening with horizon.
   const maeUnit = Math.max(forecast.model_mae, current * 0.006)
   for (let k = 1; k <= FWD_DAYS; k++) {
     const t = k / FWD_DAYS

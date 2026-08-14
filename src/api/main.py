@@ -287,7 +287,7 @@ def search_card_by_name(
         CardSearchResult(
             uuid=r[0], 
             name=r[1], 
-            set_code=r[2],
+            set_code=r[2], 
             collector_number=str(r[3]) if r[3] else None,
             finish=r[4], 
             floor_price=round(float(r[5]), 2),
@@ -299,14 +299,14 @@ def search_card_by_name(
 
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
-    min_spread: float = Query(2.00, description="Minimum dollar spread threshold"),
-    limit: int = Query(50, le=500)
+    min_spread: float = Query(0.00, description="Minimum dollar spread threshold"),
+    limit: int = Query(100, le=500)
 ):
     """Retrieves real-time arbitrage spreads between TCGPlayer and CardKingdom with card names."""
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     
-    query = f"""
+    query = """
         SELECT 
             f.uuid, 
             COALESCE(d.name, f.uuid) as name,
@@ -320,12 +320,12 @@ def get_arbitrage(
             f.spread_pct
         FROM fact_arbitrage_opportunities f
         LEFT JOIN dim_cards d ON f.uuid = d.uuid
-        WHERE f.price_spread >= {float(min_spread)}
+        WHERE f.price_spread >= ?
         ORDER BY f.price_spread DESC
-        LIMIT {int(limit)}
+        LIMIT ?
     """
     try:
-        rows = db_conn.cursor().execute(query).fetchall()
+        rows = db_conn.cursor().execute(query, [float(min_spread), int(limit)]).fetchall()
     except Exception as e:
         print(f"[Arbitrage Error] Query execution failed: {e}")
         return []
@@ -360,8 +360,12 @@ def get_forecast(
 
     normalized_finish = "normal" if finish.lower() in ["nonfoil", "regular"] else finish.lower()
 
-    query = """
-        SELECT current_price, sma_7, sma_30, daily_return_pct
+    # Dynamically select columns matching the trained model's feature set
+    feature_cols = model_artifact.get("feature_cols", ['current_price', 'sma_7', 'sma_30', 'daily_return_pct'])
+    cols_sql = ", ".join(feature_cols)
+
+    query = f"""
+        SELECT {cols_sql}
         FROM fact_training_dataset
         WHERE uuid = ? AND vendor = ? AND finish = ?
         ORDER BY price_date DESC LIMIT 1
@@ -373,19 +377,18 @@ def get_forecast(
             detail=f"Card metrics not found for vendor '{vendor}' with finish '{finish}'."
         )
 
-    current_price, sma_7, sma_30, daily_return_pct = row
-
-    input_df = pd.DataFrame([{
-        'current_price': current_price,
-        'sma_7': sma_7,
-        'sma_30': sma_30,
-        'daily_return_pct': daily_return_pct
-    }])
+    # Construct input dataframe strictly matching model feature schema
+    input_df = pd.DataFrame([dict(zip(feature_cols, row))]).fillna(0.0)
 
     model = model_artifact["model"]
     mae = model_artifact["metrics"].get("mae", 0.0)
+    
+    # Locate current_price safely from feature list
+    current_price_idx = feature_cols.index("current_price") if "current_price" in feature_cols else 0
+    current_price = float(row[current_price_idx])
+
     pred_price = float(model.predict(input_df)[0])
-    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
+    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0.0
 
     return PredictionResponse(
         uuid=card_uuid, 
@@ -453,8 +456,11 @@ def get_card_summary(card_uuid: str):
     variant_count, floor_price, avg_price, ceiling_price = agg_row
 
     # 4. Fetch dominant variant for model inference
-    variant_query = """
-        SELECT vendor, finish, current_price, sma_7, sma_30, daily_return_pct
+    feature_cols = model_artifact.get("feature_cols", ['current_price', 'sma_7', 'sma_30', 'daily_return_pct'])
+    cols_sql = ", ".join(feature_cols)
+
+    variant_query = f"""
+        SELECT vendor, finish, {cols_sql}
         FROM fact_training_dataset
         WHERE uuid = ? AND price_date = ?
         ORDER BY current_price DESC
@@ -464,18 +470,17 @@ def get_card_summary(card_uuid: str):
     if not v_row:
         raise HTTPException(status_code=404, detail=f"Variant pricing not found for card UUID: {card_uuid}")
 
-    vendor, finish, current_price, sma_7, sma_30, daily_return_pct = v_row
+    vendor, finish = v_row[0], v_row[1]
+    feature_vals = v_row[2:]
 
-    input_df = pd.DataFrame([{
-        'current_price': current_price,
-        'sma_7': sma_7,
-        'sma_30': sma_30,
-        'daily_return_pct': daily_return_pct
-    }])
+    input_df = pd.DataFrame([dict(zip(feature_cols, feature_vals))]).fillna(0.0)
+
+    current_price_idx = feature_cols.index("current_price") if "current_price" in feature_cols else 0
+    current_price = float(feature_vals[current_price_idx])
 
     model = model_artifact["model"]
     pred_price = float(model.predict(input_df)[0])
-    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0
+    gain_pct = ((pred_price - current_price) / current_price) * 100 if current_price > 0 else 0.0
 
     return CardMarketSummary(
         uuid=card_uuid,

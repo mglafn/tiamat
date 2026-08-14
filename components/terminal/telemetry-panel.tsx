@@ -3,6 +3,8 @@
 import { useSummary, useForecast, usePrintings } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
 import { Layers } from "lucide-react"
+import type { CardVariant } from "@/lib/types"
+
 
 interface TelemetryPanelProps {
   uuid: string | null
@@ -108,7 +110,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   <span>Floor USD</span>
                 </div>
                 <div className="max-h-40 overflow-y-auto rounded-sm border border-border bg-surface/60 divide-y divide-border/40">
-                  {printings.map((p) => {
+                  {printings.map((p: CardVariant) => {
                     const isActive = p.uuid === uuid
                     const hasPrice = p.floor_price != null
 

@@ -19,3 +19,5 @@ pydantic
 # Developer Utilities & Testing 
 pytest
 black
+
+apache-airflow
