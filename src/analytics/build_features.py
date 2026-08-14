@@ -95,8 +95,8 @@ def compute_financial_indicators(db_path):
                 MIN(CASE WHEN vendor = 'cardkingdom' THEN price END) as ck_price
             FROM fact_prices
             WHERE format = 'paper'
-              -- TIME-BOUNDING: We only care about recent arbitrage opportunities!
-              AND price_date >= CURRENT_DATE - INTERVAL '30 days'
+              -- TIME-BOUNDING: Window from the latest snapshot date in the dataset
+              AND price_date >= (SELECT COALESCE(MAX(price_date), CURRENT_DATE) - INTERVAL '30 days' FROM fact_prices)
             GROUP BY uuid, price_date, finish
         )
         SELECT 

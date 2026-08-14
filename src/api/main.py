@@ -21,6 +21,7 @@ MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 model_artifact = None
 db_conn = None
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
     Maintains persistent connections to ML models and analytical databases.
     """
     global model_artifact, db_conn
+
     # 1. Load XGBoost Model Artifact
     if MODEL_PATH.exists():
         try:
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
         db_conn.close()
         print("[Shutdown] DuckDB connection closed.")
 
+
 # ------------------------------------------------------------------------------
 # Application Initialization
 # ------------------------------------------------------------------------------
@@ -65,6 +68,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
 # ------------------------------------------------------------------------------
 # Schemas (Pydantic)
 # ------------------------------------------------------------------------------
@@ -73,14 +77,24 @@ class HealthCheck(BaseModel):
     db_connected: bool
     model_loaded: bool
 
+
+class CatalogCard(BaseModel):
+    uuid: str
+    name: str
+    set_code: str
+
+
 class ArbitrageOpportunity(BaseModel):
     uuid: str
+    name: Optional[str] = "Unknown Asset"
+    set_code: Optional[str] = "OTC"
     price_date: str
     finish: str
     tcg_price: float
     ck_price: float
     price_spread: float
     spread_pct: float
+
 
 class PredictionResponse(BaseModel):
     uuid: str
@@ -90,6 +104,7 @@ class PredictionResponse(BaseModel):
     predicted_7d_price: float
     predicted_gain_pct: float
     model_mae: float
+
 
 class CardMarketSummary(BaseModel):
     uuid: str
@@ -103,6 +118,7 @@ class CardMarketSummary(BaseModel):
     predicted_7d_price: float
     predicted_gain_pct: float
 
+
 class CardSearchResult(BaseModel):
     uuid: str
     name: str
@@ -111,6 +127,8 @@ class CardSearchResult(BaseModel):
     floor_price: float
     avg_price: float
     vendor_count: int
+
+
 # ------------------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------------------
@@ -118,6 +136,7 @@ class CardSearchResult(BaseModel):
 def root():
     """Redirects root URL requests automatically to interactive Swagger API docs."""
     return RedirectResponse(url="/docs")
+
 
 @app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
@@ -127,6 +146,20 @@ def health_check():
         db_connected=db_conn is not None,
         model_loaded=model_artifact is not None
     )
+
+
+@app.get("/api/v1/catalog", response_model=List[CatalogCard], tags=["Catalog"])
+def get_catalog():
+    """Returns the card dimension catalog for client-side resolution."""
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    try:
+        rows = db_conn.execute("SELECT uuid, name, set_code FROM dim_cards").fetchall()
+        return [CatalogCard(uuid=r[0], name=r[1], set_code=r[2]) for r in rows]
+    except Exception as e:
+        print(f"[Catalog Error] Failed to query dim_cards: {e}")
+        return []
+
 
 @app.get("/api/v1/search", response_model=List[CardSearchResult], tags=["Search"])
 def search_card_by_name(
@@ -159,10 +192,14 @@ def search_card_by_name(
         LIMIT ?
     """
     search_term = f"%{name}%"
-    rows = db_conn.execute(query, [search_term, limit]).fetchall()
+    try:
+        rows = db_conn.execute(query, [search_term, limit]).fetchall()
+    except Exception as e:
+        print(f"[Search Error] Query execution failed: {e}")
+        return []
 
     if not rows:
-        raise HTTPException(status_code=404, detail=f"No card printings found matching '{name}'.")
+        return []
 
     return [
         CardSearchResult(
@@ -170,36 +207,60 @@ def search_card_by_name(
             name=r[1], 
             set_code=r[2],
             finish=r[3], 
-            floor_price=round(r[4], 2),
-            avg_price=round(r[5], 2),
-            vendor_count=r[6]
+            floor_price=round(float(r[4]), 2),
+            avg_price=round(float(r[5]), 2),
+            vendor_count=int(r[6])
         ) for r in rows
     ]
+
+
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(2.00, description="Minimum dollar spread threshold"),
     limit: int = Query(50, le=500)
 ):
-    """Retrieves real-time arbitrage spreads between TCGPlayer and CardKingdom."""
+    """Retrieves real-time arbitrage spreads between TCGPlayer and CardKingdom with card names."""
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    query = """
-        SELECT uuid, CAST(price_date AS VARCHAR), finish, tcg_price, ck_price, price_spread, spread_pct
-        FROM fact_arbitrage_opportunities
-        WHERE price_spread >= ?
-        ORDER BY price_spread DESC
-        LIMIT ?
+    # Formatted query joining dim_cards for instant human-readable names
+    query = f"""
+        SELECT 
+            f.uuid, 
+            COALESCE(d.name, f.uuid) as name,
+            COALESCE(d.set_code, 'OTC') as set_code,
+            CAST(f.price_date AS VARCHAR) as price_date, 
+            f.finish, 
+            f.tcg_price, 
+            f.ck_price, 
+            f.price_spread, 
+            f.spread_pct
+        FROM fact_arbitrage_opportunities f
+        LEFT JOIN dim_cards d ON f.uuid = d.uuid
+        WHERE f.price_spread >= {float(min_spread)}
+        ORDER BY f.price_spread DESC
+        LIMIT {int(limit)}
     """
-    rows = db_conn.execute(query, [min_spread, limit]).fetchall()
+    try:
+        rows = db_conn.execute(query).fetchall()
+    except Exception as e:
+        print(f"[Arbitrage Error] Query execution failed: {e}")
+        return []
 
     return [
         ArbitrageOpportunity(
-            uuid=r[0], price_date=r[1], finish=r[2],
-            tcg_price=round(r[3], 2), ck_price=round(r[4], 2),
-            price_spread=round(r[5], 2), spread_pct=round(r[6], 2)
+            uuid=r[0], 
+            name=r[1], 
+            set_code=r[2],
+            price_date=str(r[3]), 
+            finish=r[4], 
+            tcg_price=round(float(r[5]), 2), 
+            ck_price=round(float(r[6]), 2), 
+            price_spread=round(float(r[7]), 2), 
+            spread_pct=round(float(r[8]), 2)
         ) for r in rows
     ]
+
 
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
@@ -224,7 +285,6 @@ def get_forecast(
         ORDER BY price_date DESC LIMIT 1
     """
     row = db_conn.execute(query, [card_uuid, vendor.lower(), normalized_finish]).fetchone()
-
     if not row:
         raise HTTPException(
             status_code=404, 
@@ -251,11 +311,13 @@ def get_forecast(
         uuid=card_uuid, 
         vendor=vendor, 
         finish=normalized_finish,
-        current_price=round(current_price, 2),
+        current_price=round(float(current_price), 2),
         predicted_7d_price=round(pred_price, 2),
         predicted_gain_pct=round(gain_pct, 2),
-        model_mae=round(mae, 4)
+        model_mae=round(float(mae), 4)
     )
+
+
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
 def get_card_summary(card_uuid: str):
     """
@@ -269,7 +331,6 @@ def get_card_summary(card_uuid: str):
 
     date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
     latest_date_row = db_conn.execute(date_query, [card_uuid]).fetchone()
-
     if not latest_date_row or not latest_date_row[0]:
         raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
 
@@ -295,6 +356,9 @@ def get_card_summary(card_uuid: str):
         LIMIT 1
     """
     v_row = db_conn.execute(variant_query, [card_uuid, latest_date]).fetchone()
+    if not v_row:
+        raise HTTPException(status_code=404, detail=f"Variant pricing not found for card UUID: {card_uuid}")
+
     vendor, finish, current_price, sma_7, sma_30, daily_return_pct = v_row
 
     input_df = pd.DataFrame([{
@@ -311,16 +375,17 @@ def get_card_summary(card_uuid: str):
     return CardMarketSummary(
         uuid=card_uuid,
         latest_price_date=str(latest_date),
-        total_market_variants=variant_count,
-        floor_price=round(floor_price, 2),
-        avg_price=round(avg_price, 2),
-        ceiling_price=round(ceiling_price, 2),
-        primary_vendor=vendor,
-        primary_finish=finish,
+        total_market_variants=int(variant_count),
+        floor_price=round(float(floor_price), 2),
+        avg_price=round(float(avg_price), 2),
+        ceiling_price=round(float(ceiling_price), 2),
+        primary_vendor=str(vendor),
+        primary_finish=str(finish),
         predicted_7d_price=round(pred_price, 2),
         predicted_gain_pct=round(gain_pct, 2)
     )
 
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("src.api.main:app", host="127.0.0.1", port=8000, reload=True)
