@@ -1,0 +1,61 @@
+"use client"
+
+import { useCallback, useEffect, useState } from "react"
+import { StatusBar } from "./status-bar"
+import { Ticker } from "./ticker"
+import { ArbitrageBook } from "./arbitrage-book"
+import { ForecastPanel } from "./forecast-panel"
+import { TelemetryPanel } from "./telemetry-panel"
+import { QueryConsole } from "./query-console"
+import { CommandPalette } from "./command-palette"
+
+export function Terminal() {
+  const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
+  const [minSpread, setMinSpread] = useState(2.5)
+  const [finish, setFinish] = useState("all")
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
+  // Global ⌘K / Ctrl+K to open search.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+      }
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [])
+
+  const handleSelect = useCallback((uuid: string) => setSelectedUuid(uuid), [])
+
+  return (
+    <div className="grid-scan flex h-dvh flex-col overflow-hidden bg-background text-foreground">
+      <StatusBar onOpenSearch={() => setPaletteOpen(true)} />
+      <Ticker />
+
+      <main className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[340px_minmax(0,1fr)_300px] xl:grid-cols-[380px_minmax(0,1fr)_320px]">
+        <div className="min-h-0 overflow-hidden max-lg:h-[42vh] max-lg:border-b max-lg:border-border-strong">
+          <ArbitrageBook
+            minSpread={minSpread}
+            setMinSpread={setMinSpread}
+            finish={finish}
+            setFinish={setFinish}
+            selectedUuid={selectedUuid}
+            onSelect={handleSelect}
+          />
+        </div>
+        <div className="min-h-0 overflow-hidden max-lg:h-[52vh]">
+          <ForecastPanel uuid={selectedUuid} />
+        </div>
+        <div className="min-h-0 overflow-hidden max-lg:border-t max-lg:border-border-strong">
+          <TelemetryPanel uuid={selectedUuid} />
+        </div>
+      </main>
+
+      <QueryConsole />
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={handleSelect} />
+    </div>
+  )
+}
