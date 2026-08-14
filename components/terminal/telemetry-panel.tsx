@@ -126,11 +126,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                             {p.collector_number ? `#${p.collector_number}` : "—"}
                           </span>
                           <span className="font-semibold">{p.set_code}</span>
-                          {p.edhrec_rank != null && (
-                            <span className="hidden font-mono text-[9px] text-muted-foreground sm:inline">
-                              (r:{p.edhrec_rank})
-                            </span>
-                          )}
                         </div>
 
                         {/* Distinct styling for active price vs true $0.00 vs NO DATA */}
