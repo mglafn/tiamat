@@ -88,7 +88,7 @@ class CardVariant(BaseModel):
     uuid: str
     set_code: str
     collector_number: Optional[str] = None
-    floor_price: Optional[float] = 0.0
+    floor_price: Optional[float] = None
     edhrec_rank: Optional[int] = None
 
 
@@ -198,7 +198,7 @@ def get_card_printings(card_uuid: str):
             d.uuid, 
             d.set_code, 
             d.collector_number,
-            COALESCE(p.floor_price, 0.0) as floor_price,
+            p.floor_price,
             d.edhrec_rank
         FROM dim_cards d
         LEFT JOIN latest_prices p ON d.uuid = p.uuid
@@ -213,13 +213,34 @@ def get_card_printings(card_uuid: str):
                 uuid=r[0], 
                 set_code=r[1], 
                 collector_number=str(r[2]) if r[2] else None,
-                floor_price=round(float(r[3]), 2),
-                edhrec_rank=int(r[4]) if r[4] is not None else None
+                floor_price=round(float(r[3]), 2) if r[3] is not None else None,
+                edhrec_rank=int(r[4]) if len(r) > 4 and r[4] is not None else None
             ) for r in rows
         ]
     except Exception as e:
         print(f"[Printings Error] Failed to resolve variants: {e}")
-        return []
+        # Fallback query without edhrec_rank if column is missing
+        try:
+            fallback_query = """
+                WITH target_card AS (SELECT name FROM dim_cards WHERE uuid = ?)
+                SELECT d.uuid, d.set_code, d.collector_number, p.floor_price
+                FROM dim_cards d
+                LEFT JOIN (SELECT uuid, MIN(price) as floor_price FROM fact_prices WHERE price_date = (SELECT MAX(price_date) FROM fact_prices) GROUP BY uuid) p ON d.uuid = p.uuid
+                WHERE d.name = (SELECT name FROM target_card)
+                LIMIT 30
+            """
+            rows = db_conn.cursor().execute(fallback_query, [card_uuid]).fetchall()
+            return [
+                CardVariant(
+                    uuid=r[0],
+                    set_code=r[1],
+                    collector_number=str(r[2]) if r[2] else None,
+                    floor_price=round(float(r[3]), 2) if r[3] is not None else None,
+                    edhrec_rank=None
+                ) for r in rows
+            ]
+        except Exception:
+            return []
 
 
 @app.get("/api/v1/search", response_model=List[CardSearchResult], tags=["Search"])
@@ -375,74 +396,6 @@ def get_forecast(
         predicted_gain_pct=round(gain_pct, 2),
         model_mae=round(float(mae), 4)
     )
-
-
-@app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
-def get_card_printings(card_uuid: str):
-    """
-    Returns all set printing variants (UUID + set_code + collector_number + floor price + popularity rank)
-    that share the same card name as the provided UUID.
-    """
-    if not db_conn:
-        raise HTTPException(status_code=500, detail="Database connection unavailable.")
-    
-    query = """
-        WITH target_card AS (
-            SELECT name FROM dim_cards WHERE uuid = ?
-        ),
-        latest_prices AS (
-            SELECT uuid, MIN(price) as floor_price
-            FROM fact_prices
-            WHERE price_date = (SELECT MAX(price_date) FROM fact_prices)
-            GROUP BY uuid
-        )
-        SELECT 
-            d.uuid, 
-            d.set_code, 
-            d.collector_number,
-            COALESCE(p.floor_price, 0.0) as floor_price,
-            d.edhrec_rank
-        FROM dim_cards d
-        LEFT JOIN latest_prices p ON d.uuid = p.uuid
-        WHERE d.name = (SELECT name FROM target_card)
-        ORDER BY d.set_code ASC, d.collector_number ASC
-        LIMIT 30
-    """
-    try:
-        rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
-        return [
-            CardVariant(
-                uuid=r[0], 
-                set_code=r[1], 
-                collector_number=str(r[2]) if r[2] else None,
-                floor_price=round(float(r[3]), 2),
-                edhrec_rank=int(r[4]) if len(r) > 4 and r[4] is not None else None
-            ) for r in rows
-        ]
-    except Exception as e:
-        print(f"[Printings Error] Failed to resolve variants: {e}")
-        # Fallback query without edhrec_rank if column is missing
-        try:
-            fallback_query = """
-                WITH target_card AS (SELECT name FROM dim_cards WHERE uuid = ?)
-                SELECT d.uuid, d.set_code, d.collector_number, COALESCE(p.floor_price, 0.0)
-                FROM dim_cards d
-                LEFT JOIN (SELECT uuid, MIN(price) as floor_price FROM fact_prices WHERE price_date = (SELECT MAX(price_date) FROM fact_prices) GROUP BY uuid) p ON d.uuid = p.uuid
-                WHERE d.name = (SELECT name FROM target_card)
-                LIMIT 30
-            """
-            rows = db_conn.cursor().execute(fallback_query, [card_uuid]).fetchall()
-            return [
-                CardVariant(
-                    uuid=r[0],
-                    set_code=r[1],
-                    collector_number=str(r[2]) if r[2] else None,
-                    floor_price=round(float(r[3]), 2),
-                    edhrec_rank=None
-                ) for r in rows
-            ]
-        except Exception:
-            return []
 
 
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])

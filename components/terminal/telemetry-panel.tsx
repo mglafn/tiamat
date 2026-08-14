@@ -31,10 +31,24 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
   const edhrecRank = summary?.edhrec_rank
 
   // Distribution bar: floor -> avg -> ceiling positioning.
-  const dist = summary
+  const hasValidPriceRange =
+    summary != null &&
+    summary.floor_price != null &&
+    summary.ceiling_price != null &&
+    summary.ceiling_price > 0
+
+  const dist = hasValidPriceRange && summary
     ? {
         floorPos: 0,
-        avgPos: ((summary.avg_price - summary.floor_price) / Math.max(summary.ceiling_price - summary.floor_price, 0.01)) * 100,
+        avgPos: Math.min(
+          100,
+          Math.max(
+            0,
+            ((summary.avg_price - summary.floor_price) /
+              Math.max(summary.ceiling_price - summary.floor_price, 0.01)) *
+              100
+          )
+        ),
         ceilPos: 100,
       }
     : null
@@ -74,7 +88,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   <span className="text-dim">Variants</span>
                   <span className="tnum text-foreground">{summary?.total_market_variants ?? "—"}</span>
                 </div>
-                {edhrecRank && (
+                {edhrecRank != null && (
                   <div className="col-span-2 mt-1 flex items-center justify-between border-t border-border/40 pt-1 text-[10px]">
                     <span className="text-dim uppercase">Demand Rank</span>
                     <span className="font-mono text-up font-semibold">#{edhrecRank.toLocaleString()} (EDHREC)</span>
@@ -96,6 +110,8 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 <div className="max-h-40 overflow-y-auto rounded-sm border border-border bg-surface/60 divide-y divide-border/40">
                   {printings.map((p) => {
                     const isActive = p.uuid === uuid
+                    const hasPrice = p.floor_price != null
+
                     return (
                       <button
                         key={p.uuid}
@@ -112,15 +128,27 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                             {p.collector_number ? `#${p.collector_number}` : "—"}
                           </span>
                           <span className="font-semibold">{p.set_code}</span>
-                          {p.edhrec_rank && (
+                          {p.edhrec_rank != null && (
                             <span className="hidden sm:inline text-[9px] text-muted-foreground font-mono">
                               (r:{p.edhrec_rank})
                             </span>
                           )}
                         </div>
-                        <span className="tnum font-mono text-[11px] text-foreground">
-                          {usd(p.floor_price ?? 0)}
-                        </span>
+
+                        {/* Distinct styling for active price vs true $0.00 vs NO DATA */}
+                        {hasPrice ? (
+                          <span
+                            className={`tnum font-mono text-[11px] ${
+                              p.floor_price === 0 ? "text-muted-foreground" : "text-foreground font-medium"
+                            }`}
+                          >
+                            {usd(p.floor_price)}
+                          </span>
+                        ) : (
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-dim/60">
+                            NO DATA
+                          </span>
+                        )}
                       </button>
                     )
                   })}
@@ -145,7 +173,11 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   <Row label="Vendor Peak" value={usd(summary.ceiling_price)} tone="text-up" />
                   <Row
                     label="Spread"
-                    value={`${usd(summary.ceiling_price - summary.floor_price)} · ${pct(((summary.ceiling_price - summary.floor_price) / summary.floor_price) * 100, false)}`}
+                    value={
+                      summary.floor_price != null && summary.floor_price > 0 && summary.ceiling_price != null
+                        ? `${usd(summary.ceiling_price - summary.floor_price)} · ${pct(((summary.ceiling_price - summary.floor_price) / summary.floor_price) * 100, false)}`
+                        : "—"
+                    }
                     tone="text-warn"
                   />
                 </div>

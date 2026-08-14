@@ -1,8 +1,11 @@
 // lib/format.ts
 
-export function usd(n: number | null | undefined, opts?: { compact?: boolean }): string {
+export function usd(
+  n: number | null | undefined,
+  opts?: { compact?: boolean; fallback?: string }
+): string {
   if (n == null || typeof n !== "number" || isNaN(n)) {
-    return "$0.00"
+    return opts?.fallback ?? "—"
   }
   if (opts?.compact && Math.abs(n) >= 1000) {
     return `$${(n / 1000).toFixed(2)}K`
@@ -10,9 +13,13 @@ export function usd(n: number | null | undefined, opts?: { compact?: boolean }):
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-export function pct(n: number | null | undefined, withSign = true): string {
+export function pct(
+  n: number | null | undefined,
+  withSign = true,
+  opts?: { fallback?: string }
+): string {
   if (n == null || typeof n !== "number" || isNaN(n)) {
-    return "0.00%"
+    return opts?.fallback ?? "—"
   }
   const s = withSign && n > 0 ? "+" : ""
   return `${s}${n.toFixed(2)}%`
