@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
     description="Enterprise microservice for querying cross-vendor arbitrage spreads, card portfolio market summaries, and XGBoost price predictions.",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan
 )
 
@@ -80,6 +80,11 @@ class HealthCheck(BaseModel):
 class CatalogCard(BaseModel):
     uuid: str
     name: str
+    set_code: str
+
+
+class CardVariant(BaseModel):
+    uuid: str
     set_code: str
 
 
@@ -107,6 +112,8 @@ class PredictionResponse(BaseModel):
 
 class CardMarketSummary(BaseModel):
     uuid: str
+    name: str = "Unknown Asset"
+    set_code: str = "OTC"
     latest_price_date: str
     total_market_variants: int
     floor_price: float
@@ -157,6 +164,29 @@ def get_catalog():
         return [CatalogCard(uuid=r[0], name=r[1], set_code=r[2]) for r in rows]
     except Exception as e:
         print(f"[Catalog Error] Failed to query dim_cards: {e}")
+        return []
+
+
+@app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
+def get_card_printings(card_uuid: str):
+    """
+    Returns all set printing variants (UUID + set_code) that share the same 
+    card name as the provided UUID.
+    """
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    
+    query = """
+        SELECT DISTINCT ON (set_code) uuid, set_code 
+        FROM dim_cards 
+        WHERE name = (SELECT name FROM dim_cards WHERE uuid = ?)
+        ORDER BY set_code ASC
+    """
+    try:
+        rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
+        return [CardVariant(uuid=r[0], set_code=r[1]) for r in rows]
+    except Exception as e:
+        print(f"[Printings Error] Failed to resolve variants: {e}")
         return []
 
 
@@ -322,6 +352,13 @@ def get_card_summary(card_uuid: str):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
 
+    # 1. Fetch metadata from dim_cards
+    dim_query = "SELECT name, set_code FROM dim_cards WHERE uuid = ?"
+    dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
+    card_name = dim_row[0] if dim_row else "Unknown Asset"
+    set_code = dim_row[1] if dim_row else "OTC"
+
+    # 2. Find latest price date
     date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
     latest_date_row = db_conn.cursor().execute(date_query, [card_uuid]).fetchone()
     if not latest_date_row or not latest_date_row[0]:
@@ -329,6 +366,7 @@ def get_card_summary(card_uuid: str):
     
     latest_date = latest_date_row[0]
 
+    # 3. Aggregate pricing metrics
     agg_query = """
         SELECT 
             COUNT(*) as variant_count,
@@ -341,6 +379,7 @@ def get_card_summary(card_uuid: str):
     agg_row = db_conn.cursor().execute(agg_query, [card_uuid, latest_date]).fetchone()
     variant_count, floor_price, avg_price, ceiling_price = agg_row
 
+    # 4. Fetch dominant variant for model inference
     variant_query = """
         SELECT vendor, finish, current_price, sma_7, sma_30, daily_return_pct
         FROM fact_training_dataset
@@ -367,6 +406,8 @@ def get_card_summary(card_uuid: str):
 
     return CardMarketSummary(
         uuid=card_uuid,
+        name=card_name,
+        set_code=set_code,
         latest_price_date=str(latest_date),
         total_market_variants=int(variant_count),
         floor_price=round(float(floor_price), 2),

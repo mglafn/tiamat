@@ -5,6 +5,7 @@ import type {
   ArbitrageOpportunity,
   CardMarketSummary,
   CardSearchResult,
+  CardVariant,
   CatalogCard,
   HealthCheck,
   PredictionResponse,
@@ -69,6 +70,15 @@ export function useSummary(uuid: string | null) {
     dedupingInterval: 5000,
   })
   return { data, error, isLoading, isValidating, mutate }
+}
+
+export function usePrintings(uuid: string | null) {
+  const key = uuid ? `/api/card/printings/${uuid}` : null
+  const { data, error, isLoading } = useSWR<CardVariant[]>(key, fetcher, {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+  })
+  return { printings: data ?? [], error, isLoading }
 }
 
 export function useSearch(query: string) {

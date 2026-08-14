@@ -7,6 +7,16 @@ import { usd, pct, shortUuid } from "@/lib/format"
 const SPREAD_OPTIONS = [0, 2.5, 5, 10, 20]
 const FINISH_OPTIONS = ["all", "normal", "foil"] as const
 
+interface ArbitrageBookProps {
+  minSpread: number
+  setMinSpread: (n: number) => void
+  finish: string
+  setFinish: (f: string) => void
+  selectedUuid: string | null
+  selectedFinish?: string
+  onSelect: (uuid: string, rowFinish?: string) => void
+}
+
 export function ArbitrageBook({
   minSpread,
   setMinSpread,
@@ -15,15 +25,7 @@ export function ArbitrageBook({
   selectedUuid,
   selectedFinish,
   onSelect,
-}: {
-  minSpread: number
-  setMinSpread: (n: number) => void
-  finish: string
-  setFinish: (f: string) => void
-  selectedUuid: string | null
-  selectedFinish?: string
-  onSelect: (uuid: string, finish: string) => void
-}) {
+}: ArbitrageBookProps) {
   const { rows, error, isLoading, isValidating } = useArbitrage(minSpread, finish)
   const catalog = useCatalog()
   const listRef = useRef<HTMLDivElement>(null)
@@ -33,12 +35,14 @@ export function ArbitrageBook({
     [rows, selectedUuid, selectedFinish]
   )
 
+  // 1. Auto-select first row when data arrives
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
       onSelect(rows[0].uuid, rows[0].finish)
     }
   }, [rows, selectedUuid, onSelect])
 
+  // 2. Keyboard J/K navigation listener
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -55,11 +59,11 @@ export function ArbitrageBook({
     return () => window.removeEventListener("keydown", handler)
   }, [rows, selectedIndex, onSelect])
 
+  // 3. Scroll active row into view
   useEffect(() => {
-    const targetAttr = selectedFinish ? `[data-sku="${selectedUuid}-${selectedFinish}"]` : `[data-uuid="${selectedUuid}"]`
-    const el = listRef.current?.querySelector<HTMLElement>(targetAttr)
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-uuid="${selectedUuid}"]`)
     el?.scrollIntoView({ block: "nearest" })
-  }, [selectedUuid, selectedFinish])
+  }, [selectedUuid])
 
   return (
     <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
@@ -153,23 +157,22 @@ export function ArbitrageBook({
           const meta = catalog.get(r.uuid)
           const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)
           const setCode = r.set_code ?? meta?.set_code
-          const isSelected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
+          const selected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
           const hot = r.spread_pct >= 25
           return (
             <button
               key={`${r.uuid}-${r.finish}-${i}`}
               type="button"
-              data-sku={`${r.uuid}-${r.finish}`}
               data-uuid={r.uuid}
               onClick={() => onSelect(r.uuid, r.finish)}
               className={`grid w-full grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/50 px-3 py-1 text-left text-[11px] transition-colors ${
-                isSelected ? "bg-accent/15 ring-1 ring-inset ring-accent/50" : "hover:bg-surface-2/60"
+                selected ? "bg-accent/15 ring-1 ring-inset ring-accent/50" : "hover:bg-surface-2/60"
               }`}
             >
               <span className="truncate">
-                <span className={isSelected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
+                <span className={selected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
                 {setCode && <span className="ml-1 text-dim">({setCode})</span>}
-                {r.finish === "foil" && <span className="ml-1 text-[9px] text-warn font-semibold">FOIL</span>}
+                {r.finish === "foil" && <span className="ml-1 text-[9px] text-warn">FOIL</span>}
               </span>
               <span className="tnum w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
               <span className="tnum w-14 text-right text-foreground">{usd(r.ck_price, { compact: true })}</span>

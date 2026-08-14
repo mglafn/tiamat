@@ -1,7 +1,13 @@
 "use client"
 
-import { useSummary, useForecast, useCatalog } from "@/lib/hooks"
+import { useSummary, useForecast, usePrintings } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
+
+interface TelemetryPanelProps {
+  uuid: string | null
+  selectedFinish?: string
+  onSelectUuid?: (uuid: string) => void
+}
 
 function Row({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
@@ -12,21 +18,14 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
   )
 }
 
-export function TelemetryPanel({
-  uuid,
-  selectedFinish = "normal",
-}: {
-  uuid: string | null
-  selectedFinish?: string
-}) {
+export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }: TelemetryPanelProps) {
   const { data: summary } = useSummary(uuid)
-  const catalog = useCatalog()
-  const name = uuid ? (catalog.get(uuid)?.name ?? shortUuid(uuid)) : null
-
-  // Use the active finish variant selected by the user, falling back to summary's primary finish
-  const targetFinish = selectedFinish || summary?.primary_finish || "normal"
-  const targetVendor = summary?.primary_vendor || "tcgplayer"
-  const { data: forecast } = useForecast(uuid, targetVendor, targetFinish)
+  const { data: forecast } = useForecast(uuid, "tcgplayer", selectedFinish)
+  const { printings } = usePrintings(uuid)
+  
+  // Hydrate directly from summary payload
+  const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
+  const setCode = summary?.set_code ?? "—"
 
   // Distribution bar: floor -> avg -> ceiling positioning.
   const dist = summary
@@ -55,11 +54,11 @@ export function TelemetryPanel({
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                 <div className="flex justify-between">
                   <span className="text-dim">Finish</span>
-                  <span className="capitalize text-foreground">{selectedFinish || summary?.primary_finish || "—"}</span>
+                  <span className="capitalize text-foreground">{selectedFinish}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-dim">Set</span>
-                  <span className="text-foreground">{uuid ? (catalog.get(uuid)?.set_code ?? "—") : "—"}</span>
+                  <span className="text-dim">Active Set</span>
+                  <span className="text-foreground font-semibold">{setCode}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-dim">Vendor</span>
@@ -70,6 +69,32 @@ export function TelemetryPanel({
                   <span className="tnum text-foreground">{summary?.total_market_variants ?? "—"}</span>
                 </div>
               </div>
+
+              {/* Set Printing Toggle Badges */}
+              {printings.length > 1 && (
+                <div className="mt-2.5 pt-2 border-t border-border/60">
+                  <div className="mb-1.5 text-[10px] uppercase text-dim">Available Printings</div>
+                  <div className="flex flex-wrap gap-1">
+                    {printings.map((p) => {
+                      const isActive = p.uuid === uuid
+                      return (
+                        <button
+                          key={p.uuid}
+                          type="button"
+                          onClick={() => onSelectUuid?.(p.uuid)}
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
+                            isActive
+                              ? "bg-accent text-accent-foreground font-bold"
+                              : "border border-border bg-surface-2 text-dim hover:border-accent hover:text-foreground"
+                          }`}
+                        >
+                          {p.set_code}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Price distribution */}

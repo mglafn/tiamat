@@ -2,6 +2,7 @@ import type {
   ArbitrageOpportunity,
   CardMarketSummary,
   CardSearchResult,
+  CardVariant,
   HealthCheck,
   PredictionResponse,
 } from "./types"
@@ -58,7 +59,7 @@ const SEEDS: Seed[] = [
   { name: "Wrenn and Six", set_code: "MH1", base: 61.0, finish: "normal", vol: 0.7 },
   { name: "Ancient Tomb", set_code: "TPR", base: 88.0, finish: "normal", vol: 0.6 },
   { name: "Scalding Tarn", set_code: "MH2", base: 24.5, finish: "normal", vol: 0.5 },
-  { name: "Ragavan, Nimble Pilferer", set_code: "MH2", base: 132.0, finish: "foil", vol: 1.0 },
+  { name: "Ragavan, Nimble Pilferer", set_code: "MUL", base: 132.0, finish: "foil", vol: 1.0 },
   { name: "Slickshot Show-Off", set_code: "OTJ", base: 12.8, finish: "normal", vol: 1.3 },
   { name: "Vein Ripper", set_code: "MKM", base: 33.5, finish: "normal", vol: 1.5 },
   { name: "Urza's Saga", set_code: "MH2", base: 42.0, finish: "normal", vol: 0.9 },
@@ -140,6 +141,16 @@ export function mockHealth(): HealthCheck {
   return { status: "healthy", db_connected: true, model_loaded: true }
 }
 
+export function mockPrintings(uuid: string): CardVariant[] {
+  const entry = BY_UUID.get(uuid)
+  if (!entry) return []
+  const cardName = entry.seed.name
+  return CATALOG.filter((c) => c.seed.name === cardName).map((c) => ({
+    uuid: c.uuid,
+    set_code: c.seed.set_code,
+  }))
+}
+
 export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpportunity[] {
   const rows: ArbitrageOpportunity[] = CATALOG.map((entry) => {
     const m = metricsFor(entry)
@@ -150,6 +161,8 @@ export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpport
     const pct = round((spread / tcg) * 100)
     return {
       uuid: entry.uuid,
+      name: entry.seed.name,
+      set_code: entry.seed.set_code,
       price_date: TODAY,
       finish: entry.seed.finish,
       tcg_price: tcg,
@@ -191,6 +204,8 @@ export function mockSummary(uuid: string): CardMarketSummary | null {
   const rnd = mulberry32(hashSeed(uuid + "vendor"))
   return {
     uuid,
+    name: entry.seed.name,
+    set_code: entry.seed.set_code,
     latest_price_date: TODAY,
     total_market_variants: m.variants,
     floor_price: m.floor,

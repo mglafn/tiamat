@@ -4,15 +4,17 @@ import { CornerDownLeft, Loader2, Search } from "lucide-react"
 import { useSearch } from "@/lib/hooks"
 import { usd } from "@/lib/format"
 
+interface CommandPaletteProps {
+  open: boolean
+  onClose: () => void
+  onSelect: (uuid: string, finish?: string) => void
+}
+
 export function CommandPalette({
   open,
   onClose,
   onSelect,
-}: {
-  open: boolean
-  onClose: () => void
-  onSelect: (uuid: string, finish?: string) => void
-}) {
+}: CommandPaletteProps) {
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -97,7 +99,7 @@ export function CommandPalette({
           {!isLoading &&
             results.map((r, i) => (
               <button
-                key={`${r.uuid}-${r.finish}`}
+                key={r.uuid}
                 type="button"
                 onMouseEnter={() => setActive(i)}
                 onClick={() => {

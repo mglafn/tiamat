@@ -6,6 +6,11 @@ export interface HealthCheck {
   model_loaded: boolean
 }
 
+export interface CardVariant {
+  uuid: string
+  set_code: string
+}
+
 export interface ArbitrageOpportunity {
   uuid: string
   name?: string
@@ -30,6 +35,8 @@ export interface PredictionResponse {
 
 export interface CardMarketSummary {
   uuid: string
+  name: string
+  set_code: string
   latest_price_date: string
   total_market_variants: number
   floor_price: number

@@ -1,7 +1,7 @@
 "use client"
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { Crosshair, Loader2, TrendingDown, TrendingUp } from "lucide-react"
-import { useForecast, useSummary, useCatalog } from "@/lib/hooks"
+import { useForecast, useSummary } from "@/lib/hooks"
 import { buildDrift, type DriftPoint } from "@/lib/series"
 import { usd, pct, shortUuid } from "@/lib/format"
 
@@ -14,33 +14,19 @@ const padB = 24
 const FINISHES = ["normal", "foil"] as const
 const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"] as const
 
-export function ForecastPanel({
-  uuid,
-  selectedFinish = "normal",
-  onFinishChange,
-}: {
+interface ForecastPanelProps {
   uuid: string | null
-  selectedFinish?: string
-  onFinishChange?: (f: string) => void
-}) {
-  const [finish, setFinish] = useState<string>(selectedFinish)
+  selectedFinish: string
+  onFinishChange: (finish: string) => void
+}
+
+export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: ForecastPanelProps) {
   const [vendor, setVendor] = useState<string>("tcgplayer")
+  const finish = selectedFinish
+  const setFinish = onFinishChange
   
-  // Keep local finish state in sync with parent selections (e.g. clicking rows in ArbitrageBook)
-  useEffect(() => {
-    if (selectedFinish) {
-      setFinish(selectedFinish)
-    }
-  }, [selectedFinish, uuid])
-
-  const handleFinishSelect = (f: string) => {
-    setFinish(f)
-    onFinishChange?.(f)
-  }
-
   const { data: forecast, error: forecastError, isLoading: forecastLoading } = useForecast(uuid, vendor, finish)
   const { data: summary, error: summaryError, isLoading: summaryLoading } = useSummary(uuid)
-  const catalog = useCatalog()
   
   const isLoading = forecastLoading || summaryLoading
   const isError = forecastError || summaryError
@@ -96,7 +82,8 @@ export function ForecastPanel({
     return { x, y, nowIdx, line, cone, yTicks, xLabels }
   }, [points])
 
-  const name = uuid ? (catalog.get(uuid)?.name ?? shortUuid(uuid)) : null
+  // Hydrate directly from summary payload
+  const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const gainPositive = (forecast?.predicted_gain_pct ?? 0) >= 0
 
   return (
@@ -139,8 +126,8 @@ export function ForecastPanel({
               <button
                 key={f}
                 type="button"
-                onClick={() => handleFinishSelect(f)}
-                className={`px-1.5 py-0.5 transition-colors ${finish === f ? "bg-accent text-accent-foreground font-medium" : "text-dim hover:text-muted-foreground"}`}
+                onClick={() => setFinish(f)}
+                className={`px-1.5 py-0.5 transition-colors ${finish === f ? "bg-accent text-accent-foreground" : "text-dim hover:text-muted-foreground"}`}
               >
                 {f}
               </button>
@@ -159,9 +146,7 @@ export function ForecastPanel({
         {uuid && isError && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
             <span className="font-mono text-[11px] uppercase tracking-wider text-down">Inference Error</span>
-            <span className="text-[10px] text-dim">
-              No historical data for vendor &apos;{vendor}&apos; with finish &apos;{finish}&apos;.
-            </span>
+            <span className="text-[10px] text-dim">Failed to fetch forecast from service</span>
           </div>
         )}
         {uuid && (isLoading || !geom) && !isError && (

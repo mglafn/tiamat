@@ -59,6 +59,7 @@ export function Terminal() {
           <TelemetryPanel 
             uuid={selectedUuid} 
             selectedFinish={selectedFinish}
+            onSelectUuid={(newUuid) => handleSelect(newUuid, selectedFinish)}
           />
         </div>
       </main>
