@@ -73,7 +73,8 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
                 name, 
                 COALESCE(setCode, 'OTC') as set_code, 
                 number as collector_number, 
-                rarity
+                rarity,
+                TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank
             FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
         """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")

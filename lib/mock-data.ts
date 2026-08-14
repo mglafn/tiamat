@@ -44,33 +44,35 @@ interface Seed {
   base: number // approximate market value (USD)
   finish: "normal" | "foil"
   vol: number // volatility factor
+  collector_number?: string
+  edhrec_rank?: number
 }
 
 const SEEDS: Seed[] = [
-  { name: "Ragavan, Nimble Pilferer", set_code: "MH2", base: 46.0, finish: "normal", vol: 0.9 },
-  { name: "Sheoldred, the Apocalypse", set_code: "DMU", base: 72.0, finish: "normal", vol: 0.7 },
-  { name: "Force of Will", set_code: "EMA", base: 63.5, finish: "normal", vol: 0.6 },
-  { name: "Orcish Bowmasters", set_code: "LTR", base: 40.2, finish: "normal", vol: 1.0 },
-  { name: "The One Ring", set_code: "LTR", base: 58.0, finish: "normal", vol: 1.1 },
-  { name: "Mox Diamond", set_code: "STH", base: 680.0, finish: "foil", vol: 0.5 },
-  { name: "Underworld Breach", set_code: "THB", base: 15.1, finish: "foil", vol: 1.4 },
-  { name: "Grief", set_code: "MH2", base: 18.2, finish: "normal", vol: 1.2 },
-  { name: "Fable of the Mirror-Breaker", set_code: "NEO", base: 22.4, finish: "normal", vol: 0.8 },
-  { name: "Wrenn and Six", set_code: "MH1", base: 61.0, finish: "normal", vol: 0.7 },
-  { name: "Ancient Tomb", set_code: "TPR", base: 88.0, finish: "normal", vol: 0.6 },
-  { name: "Scalding Tarn", set_code: "MH2", base: 24.5, finish: "normal", vol: 0.5 },
-  { name: "Ragavan, Nimble Pilferer", set_code: "MUL", base: 132.0, finish: "foil", vol: 1.0 },
-  { name: "Slickshot Show-Off", set_code: "OTJ", base: 12.8, finish: "normal", vol: 1.3 },
-  { name: "Vein Ripper", set_code: "MKM", base: 33.5, finish: "normal", vol: 1.5 },
-  { name: "Urza's Saga", set_code: "MH2", base: 42.0, finish: "normal", vol: 0.9 },
-  { name: "Solitude", set_code: "MH2", base: 44.0, finish: "normal", vol: 0.8 },
-  { name: "Elesh Norn, Mother of Machines", set_code: "ONE", base: 28.0, finish: "normal", vol: 0.9 },
-  { name: "Bloodstained Mire", set_code: "KTK", base: 21.0, finish: "normal", vol: 0.5 },
-  { name: "Nadu, Winged Wisdom", set_code: "MH3", base: 9.4, finish: "normal", vol: 1.6 },
-  { name: "Phlage, Titan of Fire's Fury", set_code: "MH3", base: 34.0, finish: "normal", vol: 1.1 },
-  { name: "Emrakul, the Aeons Torn", set_code: "MOR", base: 76.0, finish: "normal", vol: 0.7 },
-  { name: "Liliana of the Veil", set_code: "MM3", base: 19.9, finish: "normal", vol: 0.6 },
-  { name: "Misty Rainforest", set_code: "MH2", base: 26.5, finish: "normal", vol: 0.5 },
+  { name: "Ragavan, Nimble Pilferer", set_code: "MH2", base: 46.0, finish: "normal", vol: 0.9, collector_number: "138", edhrec_rank: 42 },
+  { name: "Sheoldred, the Apocalypse", set_code: "DMU", base: 72.0, finish: "normal", vol: 0.7, collector_number: "107", edhrec_rank: 18 },
+  { name: "Force of Will", set_code: "EMA", base: 63.5, finish: "normal", vol: 0.6, collector_number: "49", edhrec_rank: 35 },
+  { name: "Orcish Bowmasters", set_code: "LTR", base: 40.2, finish: "normal", vol: 1.0, collector_number: "103", edhrec_rank: 12 },
+  { name: "The One Ring", set_code: "LTR", base: 58.0, finish: "normal", vol: 1.1, collector_number: "246", edhrec_rank: 8 },
+  { name: "Mox Diamond", set_code: "STH", base: 680.0, finish: "foil", vol: 0.5, collector_number: "138", edhrec_rank: 110 },
+  { name: "Underworld Breach", set_code: "THB", base: 15.1, finish: "foil", vol: 1.4, collector_number: "161", edhrec_rank: 84 },
+  { name: "Grief", set_code: "MH2", base: 18.2, finish: "normal", vol: 1.2, collector_number: "87", edhrec_rank: 320 },
+  { name: "Fable of the Mirror-Breaker", set_code: "NEO", base: 22.4, finish: "normal", vol: 0.8, collector_number: "141", edhrec_rank: 95 },
+  { name: "Wrenn and Six", set_code: "MH1", base: 61.0, finish: "normal", vol: 0.7, collector_number: "217", edhrec_rank: 450 },
+  { name: "Ancient Tomb", set_code: "TPR", base: 88.0, finish: "normal", vol: 0.6, collector_number: "236", edhrec_rank: 14 },
+  { name: "Scalding Tarn", set_code: "MH2", base: 24.5, finish: "normal", vol: 0.5, collector_number: "254", edhrec_rank: 22 },
+  { name: "Ragavan, Nimble Pilferer", set_code: "MUL", base: 132.0, finish: "foil", vol: 1.0, collector_number: "86", edhrec_rank: 42 },
+  { name: "Slickshot Show-Off", set_code: "OTJ", base: 12.8, finish: "normal", vol: 1.3, collector_number: "145", edhrec_rank: 610 },
+  { name: "Vein Ripper", set_code: "MKM", base: 33.5, finish: "normal", vol: 1.5, collector_number: "110", edhrec_rank: 890 },
+  { name: "Urza's Saga", set_code: "MH2", base: 42.0, finish: "normal", vol: 0.9, collector_number: "259", edhrec_rank: 15 },
+  { name: "Solitude", set_code: "MH2", base: 44.0, finish: "normal", vol: 0.8, collector_number: "32", edhrec_rank: 140 },
+  { name: "Elesh Norn, Mother of Machines", set_code: "ONE", base: 28.0, finish: "normal", vol: 0.9, collector_number: "218", edhrec_rank: 29 },
+  { name: "Bloodstained Mire", set_code: "KTK", base: 21.0, finish: "normal", vol: 0.5, collector_number: "230", edhrec_rank: 31 },
+  { name: "Nadu, Winged Wisdom", set_code: "MH3", base: 9.4, finish: "normal", vol: 1.6, collector_number: "193", edhrec_rank: 105 },
+  { name: "Phlage, Titan of Fire's Fury", set_code: "MH3", base: 34.0, finish: "normal", vol: 1.1, collector_number: "197", edhrec_rank: 412 },
+  { name: "Emrakul, the Aeons Torn", set_code: "MOR", base: 76.0, finish: "normal", vol: 0.7, collector_number: "4", edhrec_rank: 380 },
+  { name: "Liliana of the Veil", set_code: "MM3", base: 19.9, finish: "normal", vol: 0.6, collector_number: "76", edhrec_rank: 215 },
+  { name: "Misty Rainforest", set_code: "MH2", base: 26.5, finish: "normal", vol: 0.5, collector_number: "250", edhrec_rank: 19 },
 ]
 
 const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames", "coolstuffinc"]
@@ -145,10 +147,19 @@ export function mockPrintings(uuid: string): CardVariant[] {
   const entry = BY_UUID.get(uuid)
   if (!entry) return []
   const cardName = entry.seed.name
-  return CATALOG.filter((c) => c.seed.name === cardName).map((c) => ({
-    uuid: c.uuid,
-    set_code: c.seed.set_code,
-  }))
+  return CATALOG.filter((c) => c.seed.name === cardName).map((c) => {
+    const m = metricsFor(c)
+    const rnd = mulberry32(hashSeed(c.uuid + "print"))
+    const num = c.seed.collector_number ?? String(100 + Math.floor(rnd() * 350))
+    const rank = c.seed.edhrec_rank ?? (15 + Math.floor(rnd() * 2500))
+    return {
+      uuid: c.uuid,
+      set_code: c.seed.set_code,
+      collector_number: num,
+      floor_price: m.floor,
+      edhrec_rank: rank,
+    }
+  })
 }
 
 export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpportunity[] {
@@ -163,6 +174,7 @@ export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpport
       uuid: entry.uuid,
       name: entry.seed.name,
       set_code: entry.seed.set_code,
+      collector_number: entry.seed.collector_number,
       price_date: TODAY,
       finish: entry.seed.finish,
       tcg_price: tcg,
@@ -202,10 +214,13 @@ export function mockSummary(uuid: string): CardMarketSummary | null {
   const { pred } = predict(m, entry)
   const gain = m.current > 0 ? round(((pred - m.current) / m.current) * 100) : 0
   const rnd = mulberry32(hashSeed(uuid + "vendor"))
+  const rank = entry.seed.edhrec_rank ?? (25 + Math.floor(rnd() * 1800))
   return {
     uuid,
     name: entry.seed.name,
     set_code: entry.seed.set_code,
+    collector_number: entry.seed.collector_number ?? String(100 + Math.floor(rnd() * 350)),
+    edhrec_rank: rank,
     latest_price_date: TODAY,
     total_market_variants: m.variants,
     floor_price: m.floor,
@@ -226,6 +241,7 @@ export function mockSearch(name: string, limit: number): CardSearchResult[] {
       uuid: entry.uuid,
       name: entry.seed.name,
       set_code: entry.seed.set_code,
+      collector_number: entry.seed.collector_number,
       finish: entry.seed.finish,
       floor_price: m.floor,
       avg_price: m.avg,

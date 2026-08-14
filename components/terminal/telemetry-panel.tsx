@@ -2,6 +2,7 @@
 
 import { useSummary, useForecast, usePrintings } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
+import { Layers } from "lucide-react"
 
 interface TelemetryPanelProps {
   uuid: string | null
@@ -26,6 +27,8 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
   // Hydrate directly from summary payload
   const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const setCode = summary?.set_code ?? "—"
+  const collectorNum = summary?.collector_number ? `#${summary.collector_number}` : ""
+  const edhrecRank = summary?.edhrec_rank
 
   // Distribution bar: floor -> avg -> ceiling positioning.
   const dist = summary
@@ -49,8 +52,11 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
           <>
             {/* Selected SKU card */}
             <div className="rounded-sm border border-border-strong bg-surface p-2.5">
-              <div className="text-[10px] uppercase text-dim">Selected SKU</div>
-              <div className="mt-0.5 text-[13px] text-accent text-pretty">{name}</div>
+              <div className="flex items-center justify-between text-[10px] uppercase text-dim">
+                <span>Selected SKU</span>
+                {collectorNum && <span className="font-mono text-dim">{collectorNum}</span>}
+              </div>
+              <div className="mt-0.5 text-[13px] text-accent text-pretty font-medium">{name}</div>
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                 <div className="flex justify-between">
                   <span className="text-dim">Finish</span>
@@ -68,34 +74,59 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   <span className="text-dim">Variants</span>
                   <span className="tnum text-foreground">{summary?.total_market_variants ?? "—"}</span>
                 </div>
-              </div>
-
-              {/* Set Printing Toggle Badges */}
-              {printings.length > 1 && (
-                <div className="mt-2.5 pt-2 border-t border-border/60">
-                  <div className="mb-1.5 text-[10px] uppercase text-dim">Available Printings</div>
-                  <div className="flex flex-wrap gap-1">
-                    {printings.map((p) => {
-                      const isActive = p.uuid === uuid
-                      return (
-                        <button
-                          key={p.uuid}
-                          type="button"
-                          onClick={() => onSelectUuid?.(p.uuid)}
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
-                            isActive
-                              ? "bg-accent text-accent-foreground font-bold"
-                              : "border border-border bg-surface-2 text-dim hover:border-accent hover:text-foreground"
-                          }`}
-                        >
-                          {p.set_code}
-                        </button>
-                      )
-                    })}
+                {edhrecRank && (
+                  <div className="col-span-2 mt-1 flex items-center justify-between border-t border-border/40 pt-1 text-[10px]">
+                    <span className="text-dim uppercase">Demand Rank</span>
+                    <span className="font-mono text-up font-semibold">#{edhrecRank.toLocaleString()} (EDHREC)</span>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
+
+            {/* Scryfall-Style Available Printings & Multi-Variant Table */}
+            {printings.length > 0 && (
+              <div className="mt-3">
+                <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
+                  <span className="flex items-center gap-1">
+                    <Layers className="h-3 w-3 text-accent" />
+                    Market Prints ({printings.length})
+                  </span>
+                  <span>Floor USD</span>
+                </div>
+                <div className="max-h-40 overflow-y-auto rounded-sm border border-border bg-surface/60 divide-y divide-border/40">
+                  {printings.map((p) => {
+                    const isActive = p.uuid === uuid
+                    return (
+                      <button
+                        key={p.uuid}
+                        type="button"
+                        onClick={() => onSelectUuid?.(p.uuid)}
+                        className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-[11px] transition-colors ${
+                          isActive
+                            ? "bg-accent/20 text-accent font-semibold border-l-2 border-accent"
+                            : "text-foreground hover:bg-surface-2"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <span className="font-mono text-[10px] text-dim">
+                            {p.collector_number ? `#${p.collector_number}` : "—"}
+                          </span>
+                          <span className="font-semibold">{p.set_code}</span>
+                          {p.edhrec_rank && (
+                            <span className="hidden sm:inline text-[9px] text-muted-foreground font-mono">
+                              (r:{p.edhrec_rank})
+                            </span>
+                          )}
+                        </div>
+                        <span className="tnum font-mono text-[11px] text-foreground">
+                          {usd(p.floor_price ?? 0)}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Price distribution */}
             {summary && dist && (

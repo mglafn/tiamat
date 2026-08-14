@@ -11,6 +11,8 @@ export interface CardVariant {
   uuid: string
   set_code: string
   collector_number?: string
+  floor_price?: number
+  edhrec_rank?: number
 }
 
 export interface ArbitrageOpportunity {
@@ -41,6 +43,7 @@ export interface CardMarketSummary {
   name: string
   set_code: string
   collector_number?: string
+  edhrec_rank?: number
   latest_price_date: string
   total_market_variants: number
   floor_price: number

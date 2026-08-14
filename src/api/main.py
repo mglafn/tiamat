@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
     description="Enterprise microservice for querying cross-vendor arbitrage spreads, card portfolio market summaries, and XGBoost price predictions.",
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan
 )
 
@@ -88,6 +88,8 @@ class CardVariant(BaseModel):
     uuid: str
     set_code: str
     collector_number: Optional[str] = None
+    floor_price: Optional[float] = 0.0
+    edhrec_rank: Optional[int] = None
 
 
 class ArbitrageOpportunity(BaseModel):
@@ -118,6 +120,7 @@ class CardMarketSummary(BaseModel):
     name: str = "Unknown Asset"
     set_code: str = "OTC"
     collector_number: Optional[str] = None
+    edhrec_rank: Optional[int] = None
     latest_price_date: str
     total_market_variants: int
     floor_price: float
@@ -175,21 +178,45 @@ def get_catalog():
 @app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
 def get_card_printings(card_uuid: str):
     """
-    Returns all set printing variants (UUID + set_code + collector_number) that share the same 
-    card name as the provided UUID.
+    Returns all set printing variants (UUID + set_code + collector_number + floor price + popularity rank)
+    that share the same card name as the provided UUID.
     """
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     
     query = """
-        SELECT DISTINCT ON (set_code) uuid, set_code, collector_number 
-        FROM dim_cards 
-        WHERE name = (SELECT name FROM dim_cards WHERE uuid = ?)
-        ORDER BY set_code ASC
+        WITH target_card AS (
+            SELECT name FROM dim_cards WHERE uuid = ?
+        ),
+        latest_prices AS (
+            SELECT uuid, MIN(price) as floor_price
+            FROM fact_prices
+            WHERE price_date = (SELECT MAX(price_date) FROM fact_prices)
+            GROUP BY uuid
+        )
+        SELECT 
+            d.uuid, 
+            d.set_code, 
+            d.collector_number,
+            COALESCE(p.floor_price, 0.0) as floor_price,
+            d.edhrec_rank
+        FROM dim_cards d
+        LEFT JOIN latest_prices p ON d.uuid = p.uuid
+        WHERE d.name = (SELECT name FROM target_card)
+        ORDER BY d.set_code ASC, d.collector_number ASC
+        LIMIT 30
     """
     try:
         rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
-        return [CardVariant(uuid=r[0], set_code=r[1], collector_number=str(r[2]) if r[2] else None) for r in rows]
+        return [
+            CardVariant(
+                uuid=r[0], 
+                set_code=r[1], 
+                collector_number=str(r[2]) if r[2] else None,
+                floor_price=round(float(r[3]), 2),
+                edhrec_rank=int(r[4]) if r[4] is not None else None
+            ) for r in rows
+        ]
     except Exception as e:
         print(f"[Printings Error] Failed to resolve variants: {e}")
         return []
@@ -350,6 +377,74 @@ def get_forecast(
     )
 
 
+@app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
+def get_card_printings(card_uuid: str):
+    """
+    Returns all set printing variants (UUID + set_code + collector_number + floor price + popularity rank)
+    that share the same card name as the provided UUID.
+    """
+    if not db_conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+    
+    query = """
+        WITH target_card AS (
+            SELECT name FROM dim_cards WHERE uuid = ?
+        ),
+        latest_prices AS (
+            SELECT uuid, MIN(price) as floor_price
+            FROM fact_prices
+            WHERE price_date = (SELECT MAX(price_date) FROM fact_prices)
+            GROUP BY uuid
+        )
+        SELECT 
+            d.uuid, 
+            d.set_code, 
+            d.collector_number,
+            COALESCE(p.floor_price, 0.0) as floor_price,
+            d.edhrec_rank
+        FROM dim_cards d
+        LEFT JOIN latest_prices p ON d.uuid = p.uuid
+        WHERE d.name = (SELECT name FROM target_card)
+        ORDER BY d.set_code ASC, d.collector_number ASC
+        LIMIT 30
+    """
+    try:
+        rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
+        return [
+            CardVariant(
+                uuid=r[0], 
+                set_code=r[1], 
+                collector_number=str(r[2]) if r[2] else None,
+                floor_price=round(float(r[3]), 2),
+                edhrec_rank=int(r[4]) if len(r) > 4 and r[4] is not None else None
+            ) for r in rows
+        ]
+    except Exception as e:
+        print(f"[Printings Error] Failed to resolve variants: {e}")
+        # Fallback query without edhrec_rank if column is missing
+        try:
+            fallback_query = """
+                WITH target_card AS (SELECT name FROM dim_cards WHERE uuid = ?)
+                SELECT d.uuid, d.set_code, d.collector_number, COALESCE(p.floor_price, 0.0)
+                FROM dim_cards d
+                LEFT JOIN (SELECT uuid, MIN(price) as floor_price FROM fact_prices WHERE price_date = (SELECT MAX(price_date) FROM fact_prices) GROUP BY uuid) p ON d.uuid = p.uuid
+                WHERE d.name = (SELECT name FROM target_card)
+                LIMIT 30
+            """
+            rows = db_conn.cursor().execute(fallback_query, [card_uuid]).fetchall()
+            return [
+                CardVariant(
+                    uuid=r[0],
+                    set_code=r[1],
+                    collector_number=str(r[2]) if r[2] else None,
+                    floor_price=round(float(r[3]), 2),
+                    edhrec_rank=None
+                ) for r in rows
+            ]
+        except Exception:
+            return []
+
+
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
 def get_card_summary(card_uuid: str):
     """
@@ -361,12 +456,27 @@ def get_card_summary(card_uuid: str):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
 
-    # 1. Fetch metadata from dim_cards (including collector_number)
-    dim_query = "SELECT name, set_code, collector_number FROM dim_cards WHERE uuid = ?"
-    dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
-    card_name = dim_row[0] if dim_row else "Unknown Asset"
-    set_code = dim_row[1] if dim_row else "OTC"
-    collector_number = str(dim_row[2]) if dim_row and dim_row[2] else None
+    # 1. Fetch metadata from dim_cards with safe fallback
+    card_name = "Unknown Asset"
+    set_code = "OTC"
+    collector_number = None
+    edhrec_rank = None
+
+    try:
+        dim_query = "SELECT name, set_code, collector_number, edhrec_rank FROM dim_cards WHERE uuid = ?"
+        dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
+        if dim_row:
+            card_name = dim_row[0]
+            set_code = dim_row[1]
+            collector_number = str(dim_row[2]) if dim_row[2] else None
+            edhrec_rank = int(dim_row[3]) if dim_row[3] is not None else None
+    except Exception:
+        dim_query = "SELECT name, set_code, collector_number FROM dim_cards WHERE uuid = ?"
+        dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
+        if dim_row:
+            card_name = dim_row[0]
+            set_code = dim_row[1]
+            collector_number = str(dim_row[2]) if dim_row[2] else None
 
     # 2. Find latest price date
     date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
@@ -419,6 +529,7 @@ def get_card_summary(card_uuid: str):
         name=card_name,
         set_code=set_code,
         collector_number=collector_number,
+        edhrec_rank=edhrec_rank,
         latest_price_date=str(latest_date),
         total_market_variants=int(variant_count),
         floor_price=round(float(floor_price), 2),
