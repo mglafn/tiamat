@@ -1,7 +1,6 @@
 "use client"
-
 import { useMemo, useState } from "react"
-import { TrendingDown, TrendingUp } from "lucide-react"
+import { Crosshair, Loader2, TrendingDown, TrendingUp } from "lucide-react"
 import { useForecast, useSummary, useCatalog } from "@/lib/hooks"
 import { buildDrift, type DriftPoint } from "@/lib/series"
 import { usd, pct, shortUuid } from "@/lib/format"
@@ -12,16 +11,17 @@ const padL = 48
 const padR = 14
 const padT = 16
 const padB = 24
-
 const FINISHES = ["normal", "foil"] as const
 const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"] as const
 
 export function ForecastPanel({ uuid }: { uuid: string | null }) {
   const [finish, setFinish] = useState<string>("normal")
   const [vendor, setVendor] = useState<string>("tcgplayer")
-  const { data: forecast, isLoading } = useForecast(uuid, vendor, finish)
-  const { data: summary } = useSummary(uuid)
+  const { data: forecast, isLoading: forecastLoading } = useForecast(uuid, vendor, finish)
+  const { data: summary, isLoading: summaryLoading } = useSummary(uuid)
   const catalog = useCatalog()
+
+  const isLoading = forecastLoading || summaryLoading
 
   const points = useMemo<DriftPoint[]>(() => {
     if (!uuid || !forecast) return []
@@ -47,14 +47,12 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
     const x = (i: number) => padL + (i / (n - 1)) * plotW
     const y = (val: number) => padT + (1 - (val - lo) / (hi - lo)) * plotH
     const nowIdx = points.findIndex((p) => p.day === 0)
-
     const line = (key: keyof DriftPoint) =>
       points
         .map((p, i) => (p[key] == null ? null : `${x(i)},${y(p[key] as number)}`))
         .filter(Boolean)
         .join(" ")
 
-    // Uncertainty cone: forward upper then reversed lower, anchored at "now".
     const upper = points.filter((p) => p.upper != null)
     const lower = points.filter((p) => p.lower != null)
     let cone = ""
@@ -65,17 +63,14 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
       const lowRev = [...lower].reverse().map((p) => `${x(points.indexOf(p))},${y(p.lower as number)}`)
       cone = `${nowX},${nowY} ${up.join(" ")} ${lowRev.join(" ")}`
     }
-
     const ticks = 5
     const yTicks = Array.from({ length: ticks }, (_, i) => {
       const val = lo + ((hi - lo) * i) / (ticks - 1)
       return { val, y: y(val) }
     })
-
     const xLabels = points
       .filter((_, i) => i % 8 === 0 || points[i].day === 0)
       .map((p) => ({ x: x(points.indexOf(p)), label: p.day === 0 ? "NOW" : p.date, now: p.day === 0 }))
-
     return { x, y, nowIdx, line, cone, yTicks, xLabels }
   }, [points])
 
@@ -83,7 +78,8 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
   const gainPositive = (forecast?.predicted_gain_pct ?? 0) >= 0
 
   return (
-    <section className="flex min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical drift">
+    <section className="flex h-full min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical drift">
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-strong bg-surface px-3 py-1.5">
         <div className="flex items-baseline gap-2">
           <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Asset Forecast</h2>
@@ -95,6 +91,11 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
           )}
         </div>
         <div className="flex items-center gap-2 text-[10px] uppercase">
+          {isLoading && (
+            <span className="flex items-center gap-1 font-mono text-accent">
+              <Loader2 className="h-3 w-3 animate-spin" /> INFERRING
+            </span>
+          )}
           <div className="flex overflow-hidden rounded-sm border border-border">
             {VENDORS.map((v) => (
               <button
@@ -122,14 +123,26 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
         </div>
       </div>
 
-      <div className="relative min-h-0 flex-1 p-2">
-        {!uuid && <div className="flex h-full items-center justify-center text-[11px] text-dim">Select an asset from the order book</div>}
-        {uuid && isLoading && !geom && (
-          <div className="flex h-full items-center justify-center text-[11px] text-dim">Running inference…</div>
+      {/* Chart Canvas Area */}
+      <div className="relative flex min-h-0 flex-1 items-center justify-center p-2">
+        {!uuid && (
+          <div className="flex flex-col items-center justify-center gap-2 text-center text-dim">
+            <Crosshair className="h-8 w-8 text-dim/60" />
+            <span className="text-[11px]">Select an asset from the order book or press ⌘K to search</span>
+          </div>
         )}
-        {geom && (
-          <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price drift and forecast chart">
-            {/* horizontal gridlines + y labels */}
+
+        {uuid && (isLoading || !geom) && (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
+            <Loader2 className="h-6 w-6 animate-spin text-accent" />
+            <span className="font-mono text-[11px] uppercase tracking-wider text-accent">Running XGBoost 7-Day Inference…</span>
+            <span className="text-[10px] text-dim">Synthesizing SMA-7/30 momentum and DuckDB historical drift</span>
+          </div>
+        )}
+
+        {uuid && !isLoading && geom && (
+          <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price drift and forecast chart">
+            {/* Gridlines */}
             {geom.yTicks.map((t, i) => (
               <g key={i}>
                 <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="var(--border)" strokeWidth={0.5} />
@@ -138,13 +151,10 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
                 </text>
               </g>
             ))}
-
-            {/* forecast region shade */}
+            {/* Forecast region shade */}
             <rect x={geom.x(geom.nowIdx)} y={padT} width={W - padR - geom.x(geom.nowIdx)} height={H - padT - padB} fill="var(--accent)" opacity={0.04} />
-
             {/* MAE uncertainty cone */}
             {geom.cone && <polygon points={geom.cone} fill="var(--forecast)" opacity={0.16} />}
-
             {/* SMA-30 */}
             <polyline points={geom.line("sma30")} fill="none" stroke="var(--sma30)" strokeWidth={1} strokeDasharray="1 2" />
             {/* SMA-7 */}
@@ -153,16 +163,13 @@ export function ForecastPanel({ uuid }: { uuid: string | null }) {
             <polyline points={geom.line("actual")} fill="none" stroke="var(--hist)" strokeWidth={1.5} />
             {/* Forecast */}
             <polyline points={geom.line("forecast")} fill="none" stroke="var(--forecast)" strokeWidth={2} strokeDasharray="4 3" strokeLinecap="round" />
-
             {/* NOW divider */}
             <line x1={geom.x(geom.nowIdx)} y1={padT} x2={geom.x(geom.nowIdx)} y2={H - padB} stroke="var(--border-strong)" strokeWidth={1} strokeDasharray="2 2" />
-
-            {/* endpoint marker */}
+            {/* Endpoint marker */}
             {forecast && (
               <circle cx={geom.x(points.length - 1)} cy={geom.y(forecast.predicted_7d_price)} r={3} fill="var(--forecast)" stroke="var(--background)" strokeWidth={1} />
             )}
-
-            {/* x labels */}
+            {/* X labels */}
             {geom.xLabels.map((l, i) => (
               <text key={i} x={l.x} y={H - 8} textAnchor="middle" fontSize={9} className={l.now ? "fill-accent" : "fill-dim"}>
                 {l.label}

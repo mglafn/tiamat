@@ -1,5 +1,4 @@
 "use client"
-
 import { useCallback, useEffect, useState } from "react"
 import { StatusBar } from "./status-bar"
 import { Ticker } from "./ticker"
@@ -15,7 +14,7 @@ export function Terminal() {
   const [finish, setFinish] = useState("all")
   const [paletteOpen, setPaletteOpen] = useState(false)
 
-  // Global ⌘K / Ctrl+K to open search.
+  // Global ⌘K / Ctrl+K to open search
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -33,9 +32,8 @@ export function Terminal() {
     <div className="grid-scan flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       <StatusBar onOpenSearch={() => setPaletteOpen(true)} />
       <Ticker />
-
-      <main className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[340px_minmax(0,1fr)_300px] xl:grid-cols-[380px_minmax(0,1fr)_320px]">
-        <div className="min-h-0 overflow-hidden max-lg:h-[42vh] max-lg:border-b max-lg:border-border-strong">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[340px_minmax(0,1fr)_300px] xl:grid-cols-[380px_minmax(0,1fr)_320px]">
+        <div className="h-full min-h-0 overflow-hidden max-lg:h-[42vh] max-lg:border-b max-lg:border-border-strong">
           <ArbitrageBook
             minSpread={minSpread}
             setMinSpread={setMinSpread}
@@ -45,16 +43,14 @@ export function Terminal() {
             onSelect={handleSelect}
           />
         </div>
-        <div className="min-h-0 overflow-hidden max-lg:h-[52vh]">
+        <div className="h-full min-h-0 overflow-hidden max-lg:h-[52vh]">
           <ForecastPanel uuid={selectedUuid} />
         </div>
-        <div className="min-h-0 overflow-hidden max-lg:border-t max-lg:border-border-strong">
+        <div className="h-full min-h-0 overflow-hidden max-lg:border-t max-lg:border-border-strong">
           <TelemetryPanel uuid={selectedUuid} />
         </div>
       </main>
-
       <QueryConsole />
-
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={handleSelect} />
     </div>
   )

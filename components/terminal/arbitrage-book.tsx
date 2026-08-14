@@ -1,7 +1,6 @@
 "use client"
-
 import { useEffect, useMemo, useRef } from "react"
-import { ArrowUp, Star } from "lucide-react"
+import { ArrowUp, Loader2, RefreshCw, Star } from "lucide-react"
 import { useArbitrage, useCatalog } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
 
@@ -23,20 +22,17 @@ export function ArbitrageBook({
   selectedUuid: string | null
   onSelect: (uuid: string) => void
 }) {
-  const { rows, isLoading } = useArbitrage(minSpread, finish)
+  const { rows, isLoading, isValidating } = useArbitrage(minSpread, finish)
   const catalog = useCatalog()
   const listRef = useRef<HTMLDivElement>(null)
-
   const selectedIndex = useMemo(() => rows.findIndex((r) => r.uuid === selectedUuid), [rows, selectedUuid])
 
-  // Auto-select the top opportunity when the current selection leaves the list.
   useEffect(() => {
-    if (rows.length > 0 && selectedIndex === -1) {
+    if (!selectedUuid && rows.length > 0) {
       onSelect(rows[0].uuid)
     }
-  }, [rows, selectedIndex, onSelect])
+  }, [rows, selectedUuid, onSelect])
 
-  // J/K vim-style row cycling.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -53,17 +49,27 @@ export function ArbitrageBook({
     return () => window.removeEventListener("keydown", handler)
   }, [rows, selectedIndex, onSelect])
 
-  // Keep selected row in view.
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>(`[data-uuid="${selectedUuid}"]`)
     el?.scrollIntoView({ block: "nearest" })
   }, [selectedUuid])
 
   return (
-    <section className="flex min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
+    <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
+      {/* Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Arbitrage Order Book</h2>
-        <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
+        {isLoading && rows.length === 0 ? (
+          <span className="flex items-center gap-1.5 text-[10px] text-accent">
+            <Loader2 className="h-3 w-3 animate-spin" /> FETCHING
+          </span>
+        ) : isValidating ? (
+          <span className="flex items-center gap-1.5 text-[10px] text-accent">
+            <RefreshCw className="h-2.5 w-2.5 animate-spin" /> {rows.length} PAIRS
+          </span>
+        ) : (
+          <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
+        )}
       </div>
 
       {/* Filters */}
@@ -116,16 +122,28 @@ export function ArbitrageBook({
       {/* Rows */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
         {isLoading && rows.length === 0 && (
-          <div className="p-3 text-[11px] text-dim">Streaming order book…</div>
+          <div className="space-y-1.5 p-3">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="flex h-6 animate-pulse items-center gap-2 rounded-sm bg-surface-2/60 px-2" />
+            ))}
+          </div>
         )}
-        {rows.map((r) => {
+
+        {!isLoading && rows.length === 0 && (
+          <div className="p-4 text-center text-[11px] text-dim">
+            No cross-vendor spreads matching &gt;= ${minSpread.toFixed(2)}. Lower the spread threshold or adjust finish filter.
+          </div>
+        )}
+
+        {rows.map((r, i) => {
           const meta = catalog.get(r.uuid)
-          const name = meta?.name ?? shortUuid(r.uuid)
+          const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)
+          const setCode = r.set_code ?? meta?.set_code
           const selected = r.uuid === selectedUuid
           const hot = r.spread_pct >= 25
           return (
             <button
-              key={r.uuid}
+              key={`${r.uuid}-${r.finish}-${i}`}
               type="button"
               data-uuid={r.uuid}
               onClick={() => onSelect(r.uuid)}
@@ -134,8 +152,9 @@ export function ArbitrageBook({
               }`}
             >
               <span className="truncate">
-                <span className={selected ? "text-accent" : "text-foreground"}>{name}</span>
-                {meta?.set_code && <span className="ml-1 text-dim">{meta.set_code}</span>}
+                <span className={selected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
+                {setCode && <span className="ml-1 text-dim">({setCode})</span>}
+                {r.finish === "foil" && <span className="ml-1 text-[9px] text-warn">FOIL</span>}
               </span>
               <span className="tnum w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
               <span className="tnum w-14 text-right text-foreground">{usd(r.ck_price, { compact: true })}</span>
