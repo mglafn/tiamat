@@ -1,17 +1,17 @@
-# Environments
-venv/
-.env
+# v0 sandbox internal files
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+.snowflake/
+.v0-trash/
+.vercel/
 
-# Data
-*.csv
-*.json
-*.sqlite
-*.db
-data
+# Environment variables
+.env*.local
 
-# Python artifacts
-__pycache__/
-*.py[cod]
-.ipynb_checkpoints/
-
-repomix-output.xml
+# Common ignores
+node_modules
+.next/
+.DS_Store
+*.pyc
+/data
