@@ -81,17 +81,20 @@ class CatalogCard(BaseModel):
     uuid: str
     name: str
     set_code: str
+    collector_number: Optional[str] = None
 
 
 class CardVariant(BaseModel):
     uuid: str
     set_code: str
+    collector_number: Optional[str] = None
 
 
 class ArbitrageOpportunity(BaseModel):
     uuid: str
     name: Optional[str] = "Unknown Asset"
     set_code: Optional[str] = "OTC"
+    collector_number: Optional[str] = None
     price_date: str
     finish: str
     tcg_price: float
@@ -114,6 +117,7 @@ class CardMarketSummary(BaseModel):
     uuid: str
     name: str = "Unknown Asset"
     set_code: str = "OTC"
+    collector_number: Optional[str] = None
     latest_price_date: str
     total_market_variants: int
     floor_price: float
@@ -129,6 +133,7 @@ class CardSearchResult(BaseModel):
     uuid: str
     name: str
     set_code: str
+    collector_number: Optional[str] = None
     finish: str
     floor_price: float
     avg_price: float
@@ -160,8 +165,8 @@ def get_catalog():
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     try:
-        rows = db_conn.cursor().execute("SELECT uuid, name, set_code FROM dim_cards").fetchall()
-        return [CatalogCard(uuid=r[0], name=r[1], set_code=r[2]) for r in rows]
+        rows = db_conn.cursor().execute("SELECT uuid, name, set_code, collector_number FROM dim_cards").fetchall()
+        return [CatalogCard(uuid=r[0], name=r[1], set_code=r[2], collector_number=str(r[3]) if r[3] else None) for r in rows]
     except Exception as e:
         print(f"[Catalog Error] Failed to query dim_cards: {e}")
         return []
@@ -170,21 +175,21 @@ def get_catalog():
 @app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
 def get_card_printings(card_uuid: str):
     """
-    Returns all set printing variants (UUID + set_code) that share the same 
+    Returns all set printing variants (UUID + set_code + collector_number) that share the same 
     card name as the provided UUID.
     """
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
     
     query = """
-        SELECT DISTINCT ON (set_code) uuid, set_code 
+        SELECT DISTINCT ON (set_code) uuid, set_code, collector_number 
         FROM dim_cards 
         WHERE name = (SELECT name FROM dim_cards WHERE uuid = ?)
         ORDER BY set_code ASC
     """
     try:
         rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
-        return [CardVariant(uuid=r[0], set_code=r[1]) for r in rows]
+        return [CardVariant(uuid=r[0], set_code=r[1], collector_number=str(r[2]) if r[2] else None) for r in rows]
     except Exception as e:
         print(f"[Printings Error] Failed to resolve variants: {e}")
         return []
@@ -207,6 +212,7 @@ def search_card_by_name(
             d.uuid, 
             d.name, 
             d.set_code, 
+            d.collector_number,
             f.finish,
             MIN(f.current_price) as floor_price,
             AVG(f.current_price) as avg_price,
@@ -215,7 +221,7 @@ def search_card_by_name(
         JOIN fact_training_dataset f ON d.uuid = f.uuid
         WHERE d.name ILIKE ?
           AND f.price_date = (SELECT MAX(price_date) FROM fact_training_dataset)
-        GROUP BY d.uuid, d.name, d.set_code, f.finish
+        GROUP BY d.uuid, d.name, d.set_code, d.collector_number, f.finish
         ORDER BY floor_price DESC
         LIMIT ?
     """
@@ -234,10 +240,11 @@ def search_card_by_name(
             uuid=r[0], 
             name=r[1], 
             set_code=r[2],
-            finish=r[3], 
-            floor_price=round(float(r[4]), 2),
-            avg_price=round(float(r[5]), 2),
-            vendor_count=int(r[6])
+            collector_number=str(r[3]) if r[3] else None,
+            finish=r[4], 
+            floor_price=round(float(r[5]), 2),
+            avg_price=round(float(r[6]), 2),
+            vendor_count=int(r[7])
         ) for r in rows
     ]
 
@@ -256,6 +263,7 @@ def get_arbitrage(
             f.uuid, 
             COALESCE(d.name, f.uuid) as name,
             COALESCE(d.set_code, 'OTC') as set_code,
+            d.collector_number,
             CAST(f.price_date AS VARCHAR) as price_date, 
             f.finish, 
             f.tcg_price, 
@@ -279,12 +287,13 @@ def get_arbitrage(
             uuid=r[0], 
             name=r[1], 
             set_code=r[2],
-            price_date=str(r[3]), 
-            finish=r[4], 
-            tcg_price=round(float(r[5]), 2), 
-            ck_price=round(float(r[6]), 2), 
-            price_spread=round(float(r[7]), 2), 
-            spread_pct=round(float(r[8]), 2)
+            collector_number=str(r[3]) if r[3] else None,
+            price_date=str(r[4]), 
+            finish=r[5], 
+            tcg_price=round(float(r[6]), 2), 
+            ck_price=round(float(r[7]), 2), 
+            price_spread=round(float(r[8]), 2), 
+            spread_pct=round(float(r[9]), 2)
         ) for r in rows
     ]
 
@@ -352,11 +361,12 @@ def get_card_summary(card_uuid: str):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
 
-    # 1. Fetch metadata from dim_cards
-    dim_query = "SELECT name, set_code FROM dim_cards WHERE uuid = ?"
+    # 1. Fetch metadata from dim_cards (including collector_number)
+    dim_query = "SELECT name, set_code, collector_number FROM dim_cards WHERE uuid = ?"
     dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
     card_name = dim_row[0] if dim_row else "Unknown Asset"
     set_code = dim_row[1] if dim_row else "OTC"
+    collector_number = str(dim_row[2]) if dim_row and dim_row[2] else None
 
     # 2. Find latest price date
     date_query = "SELECT MAX(price_date) FROM fact_training_dataset WHERE uuid = ?"
@@ -408,6 +418,7 @@ def get_card_summary(card_uuid: str):
         uuid=card_uuid,
         name=card_name,
         set_code=set_code,
+        collector_number=collector_number,
         latest_price_date=str(latest_date),
         total_market_variants=int(variant_count),
         floor_price=round(float(floor_price), 2),

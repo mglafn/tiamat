@@ -1,4 +1,5 @@
-// Mirrors the FastAPI Pydantic response schemas exactly.
+// lib/types.ts
+// Mirrors the FastAPI Pydantic response schemas and client-side data structures.
 
 export interface HealthCheck {
   status: string
@@ -9,12 +10,14 @@ export interface HealthCheck {
 export interface CardVariant {
   uuid: string
   set_code: string
+  collector_number?: string
 }
 
 export interface ArbitrageOpportunity {
   uuid: string
   name?: string
   set_code?: string
+  collector_number?: string
   price_date: string
   finish: string
   tcg_price: number
@@ -37,6 +40,7 @@ export interface CardMarketSummary {
   uuid: string
   name: string
   set_code: string
+  collector_number?: string
   latest_price_date: string
   total_market_variants: number
   floor_price: number
@@ -52,16 +56,17 @@ export interface CardSearchResult {
   uuid: string
   name: string
   set_code: string
+  collector_number?: string
   finish: string
   floor_price: number
   avg_price: number
   vendor_count: number
 }
 
-// Client-only enrichment: names are not part of arbitrage/forecast payloads,
-// so the terminal resolves them from the shared catalog.
+// Client-only enrichment: used for resolving names and set numbers in the terminal
 export interface CatalogCard {
   uuid: string
   name: string
   set_code: string
+  collector_number?: string
 }

@@ -67,14 +67,15 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     print(f"Ingesting dimension catalog from {posix_path}...")
     conn.execute("DROP TABLE IF EXISTS dim_cards")
     conn.execute(f"""
-        CREATE TABLE dim_cards AS 
-        SELECT 
-            uuid, 
-            name, 
-            COALESCE(setCode, 'OTC') as set_code, 
-            rarity
-        FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
-    """)
+            CREATE TABLE dim_cards AS 
+            SELECT 
+                uuid, 
+                name, 
+                COALESCE(setCode, 'OTC') as set_code, 
+                number as collector_number, 
+                rarity
+            FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
+        """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
     count = conn.execute("SELECT COUNT(*) FROM dim_cards").fetchone()[0]
     print(f"Dimension table 'dim_cards' loaded with {count:,} cards.\n")
