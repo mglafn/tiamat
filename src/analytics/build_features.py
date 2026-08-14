@@ -1,50 +1,60 @@
 import os
+from pathlib import Path
 import duckdb
 
 def compute_financial_indicators(db_path):
-    # 1. Setup disk-spilling directory to prevent OOM on laptops
-    os.makedirs(os.path.join("data", "tmp"), exist_ok=True)
+    # 1. Setup absolute path for disk-spilling
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    tmp_dir = base_dir / "data" / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     
     conn = duckdb.connect(db_path)
-    
     print("Configuring DuckDB memory limits and disk-spilling...")
-    # Force DuckDB to cap RAM usage and spill to disk
-    conn.execute("SET memory_limit = '4GB';") 
-    conn.execute("PRAGMA temp_directory = 'data/tmp';")
+    
+    # Restrict threads and assign temp directory to prevent laptop OOM
+    conn.execute("PRAGMA threads = 2;")
+    conn.execute(f"PRAGMA temp_directory = '{tmp_dir.as_posix()}';")
+    conn.execute("SET memory_limit = '3GB';")
     
     print("Computing rolling financial indicators & arbitrage spreads in DuckDB...")
     
-    # 2. Create Indexes on raw table for high-speed windowing
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_prices ON fact_prices (uuid, vendor, finish, price_date);")
-    
-    # 3. Compute 7-day, 30-day SMA and Daily Returns using SQL Window Functions
+    # 2. Compute 7-day, 30-day SMA and Daily Returns using Optimized Row Windows
     conn.execute("""
         CREATE OR REPLACE TABLE fact_card_features AS
-        WITH daily_prices AS (
+        WITH recent_prices AS (
+            SELECT 
+                uuid,
+                vendor,
+                finish,
+                price_date,
+                price
+            FROM fact_prices
+            WHERE format = 'paper' 
+              -- Filter to last 180 days of market history to keep RAM low
+              AND price_date >= (SELECT COALESCE(MAX(price_date), CURRENT_DATE) - INTERVAL '180 days' FROM fact_prices)
+        ),
+        windowed AS (
             SELECT 
                 uuid,
                 vendor,
                 finish,
                 price_date,
                 price,
-                -- Lagged price for daily return calculation
+                -- 1-day lag for return calculation
                 LAG(price, 1) OVER (PARTITION BY uuid, vendor, finish ORDER BY price_date) as prev_price,
-                -- 7-Day Simple Moving Average (Interval Aware)
+                -- 7-Row Simple Moving Average (Vectorized)
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
+                    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
                 ) as sma_7,
-                -- 30-Day Simple Moving Average (Interval Aware)
+                -- 30-Row Simple Moving Average (Vectorized)
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    RANGE BETWEEN INTERVAL '29 days' PRECEDING AND CURRENT ROW
+                    ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
                 ) as sma_30
-            FROM fact_prices
-            WHERE format = 'paper' 
-              -- TIME-BOUNDING: Only process recent market history to save RAM
-              AND price_date >= '2024-01-01'
+            FROM recent_prices
         )
         SELECT 
             uuid,
@@ -58,10 +68,10 @@ def compute_financial_indicators(db_path):
                 WHEN prev_price > 0 THEN ((price - prev_price) / prev_price) * 100
                 ELSE 0 
             END as daily_return_pct
-        FROM daily_prices;
+        FROM windowed;
     """)
     
-    # 4. Build ML Training Dataset with 7-Day Lead Target
+    # 3. Build ML Training Dataset with 7-Day Lead Target
     print("Building ML Training Dataset with 7-Day Forward Target...")
     conn.execute("""
         CREATE OR REPLACE TABLE fact_training_dataset AS
@@ -74,7 +84,7 @@ def compute_financial_indicators(db_path):
             sma_7,
             sma_30,
             daily_return_pct,
-            -- Look forward 7 days within the same card/vendor/finish group
+            -- Look forward 7 days within the partition
             LEAD(price, 7) OVER (
                 PARTITION BY uuid, vendor, finish 
                 ORDER BY price_date
@@ -82,7 +92,7 @@ def compute_financial_indicators(db_path):
         FROM fact_card_features;
     """)
     
-    # 5. Create an Arbitrage Table: Compare prices across vendors
+    # 4. Cross-Vendor Arbitrage View (Captures today's snapshot with spread > $0.00)
     print("Building Cross-Vendor Arbitrage View...")
     conn.execute("""
         CREATE OR REPLACE TABLE fact_arbitrage_opportunities AS
@@ -95,8 +105,8 @@ def compute_financial_indicators(db_path):
                 MIN(CASE WHEN vendor = 'cardkingdom' THEN price END) as ck_price
             FROM fact_prices
             WHERE format = 'paper'
-              -- TIME-BOUNDING: Window from the latest snapshot date in the dataset
-              AND price_date >= (SELECT COALESCE(MAX(price_date), CURRENT_DATE) - INTERVAL '30 days' FROM fact_prices)
+              -- Pick the latest available market date
+              AND price_date = (SELECT MAX(price_date) FROM fact_prices)
             GROUP BY uuid, price_date, finish
         )
         SELECT 
@@ -112,12 +122,10 @@ def compute_financial_indicators(db_path):
             END as spread_pct
         FROM vendor_pivoted
         WHERE tcg_price IS NOT NULL AND ck_price IS NOT NULL
-          AND (ck_price - tcg_price) > 2.00; -- Flag gaps where spread is > $2.00
+          AND (ck_price - tcg_price) > 0.00;
     """)
     
-    print("Feature Engineering Complete! View tables created:")
-    print(" - fact_card_features (Rolling SMAs & Daily Returns)")
-    print(" - fact_arbitrage_opportunities (Cross-Vendor Price Spreads)")
+    print("Feature Engineering Complete! Tables created successfully.")
     conn.close()
 
 if __name__ == "__main__":
