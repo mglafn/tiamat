@@ -10,6 +10,7 @@ import { CommandPalette } from "./command-palette"
 
 export function Terminal() {
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
+  const [selectedFinish, setSelectedFinish] = useState<string>("normal")
   const [minSpread, setMinSpread] = useState(0) // Default to 0 so the whole catalogue is instantly visible
   const [finish, setFinish] = useState("all")
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -26,7 +27,10 @@ export function Terminal() {
     return () => window.removeEventListener("keydown", handler)
   }, [])
 
-  const handleSelect = useCallback((uuid: string) => setSelectedUuid(uuid), [])
+  const handleSelect = useCallback((uuid: string, rowFinish: string = "normal") => {
+    setSelectedUuid(uuid)
+    setSelectedFinish(rowFinish)
+  }, [])
 
   return (
     <div className="grid-scan flex h-dvh flex-col overflow-hidden bg-background text-foreground">
@@ -40,18 +44,30 @@ export function Terminal() {
             finish={finish}
             setFinish={setFinish}
             selectedUuid={selectedUuid}
+            selectedFinish={selectedFinish}
             onSelect={handleSelect}
           />
         </div>
         <div className="h-full min-h-0 overflow-hidden max-lg:h-[52vh]">
-          <ForecastPanel uuid={selectedUuid} />
+          <ForecastPanel 
+            uuid={selectedUuid} 
+            selectedFinish={selectedFinish}
+            onFinishChange={setSelectedFinish}
+          />
         </div>
         <div className="h-full min-h-0 overflow-hidden max-lg:border-t max-lg:border-border-strong">
-          <TelemetryPanel uuid={selectedUuid} />
+          <TelemetryPanel 
+            uuid={selectedUuid} 
+            selectedFinish={selectedFinish}
+          />
         </div>
       </main>
       <QueryConsole />
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onSelect={handleSelect} />
+      <CommandPalette 
+        open={paletteOpen} 
+        onClose={() => setPaletteOpen(false)} 
+        onSelect={handleSelect} 
+      />
     </div>
   )
 }

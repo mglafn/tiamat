@@ -13,6 +13,7 @@ export function ArbitrageBook({
   finish,
   setFinish,
   selectedUuid,
+  selectedFinish,
   onSelect,
 }: {
   minSpread: number
@@ -20,16 +21,21 @@ export function ArbitrageBook({
   finish: string
   setFinish: (f: string) => void
   selectedUuid: string | null
-  onSelect: (uuid: string) => void
+  selectedFinish?: string
+  onSelect: (uuid: string, finish: string) => void
 }) {
   const { rows, error, isLoading, isValidating } = useArbitrage(minSpread, finish)
   const catalog = useCatalog()
   const listRef = useRef<HTMLDivElement>(null)
-  const selectedIndex = useMemo(() => rows.findIndex((r) => r.uuid === selectedUuid), [rows, selectedUuid])
+  
+  const selectedIndex = useMemo(
+    () => rows.findIndex((r) => r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)),
+    [rows, selectedUuid, selectedFinish]
+  )
 
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
-      onSelect(rows[0].uuid)
+      onSelect(rows[0].uuid, rows[0].finish)
     }
   }, [rows, selectedUuid, onSelect])
 
@@ -42,7 +48,7 @@ export function ArbitrageBook({
         e.preventDefault()
         const cur = selectedIndex === -1 ? 0 : selectedIndex
         const next = e.key === "j" ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0)
-        onSelect(rows[next].uuid)
+        onSelect(rows[next].uuid, rows[next].finish)
       }
     }
     window.addEventListener("keydown", handler)
@@ -50,11 +56,12 @@ export function ArbitrageBook({
   }, [rows, selectedIndex, onSelect])
 
   useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-uuid="${selectedUuid}"]`)
+    const targetAttr = selectedFinish ? `[data-sku="${selectedUuid}-${selectedFinish}"]` : `[data-uuid="${selectedUuid}"]`
+    const el = listRef.current?.querySelector<HTMLElement>(targetAttr)
     el?.scrollIntoView({ block: "nearest" })
-  }, [selectedUuid])
+  }, [selectedUuid, selectedFinish])
 
- return (
+  return (
     <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
@@ -146,22 +153,23 @@ export function ArbitrageBook({
           const meta = catalog.get(r.uuid)
           const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)
           const setCode = r.set_code ?? meta?.set_code
-          const selected = r.uuid === selectedUuid
+          const isSelected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
           const hot = r.spread_pct >= 25
           return (
             <button
               key={`${r.uuid}-${r.finish}-${i}`}
               type="button"
+              data-sku={`${r.uuid}-${r.finish}`}
               data-uuid={r.uuid}
-              onClick={() => onSelect(r.uuid)}
+              onClick={() => onSelect(r.uuid, r.finish)}
               className={`grid w-full grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/50 px-3 py-1 text-left text-[11px] transition-colors ${
-                selected ? "bg-accent/15 ring-1 ring-inset ring-accent/50" : "hover:bg-surface-2/60"
+                isSelected ? "bg-accent/15 ring-1 ring-inset ring-accent/50" : "hover:bg-surface-2/60"
               }`}
             >
               <span className="truncate">
-                <span className={selected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
+                <span className={isSelected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
                 {setCode && <span className="ml-1 text-dim">({setCode})</span>}
-                {r.finish === "foil" && <span className="ml-1 text-[9px] text-warn">FOIL</span>}
+                {r.finish === "foil" && <span className="ml-1 text-[9px] text-warn font-semibold">FOIL</span>}
               </span>
               <span className="tnum w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
               <span className="tnum w-14 text-right text-foreground">{usd(r.ck_price, { compact: true })}</span>

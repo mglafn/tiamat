@@ -11,7 +11,7 @@ export function CommandPalette({
 }: {
   open: boolean
   onClose: () => void
-  onSelect: (uuid: string) => void
+  onSelect: (uuid: string, finish?: string) => void
 }) {
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
@@ -46,7 +46,7 @@ export function CommandPalette({
       e.preventDefault()
       const pick = results[active]
       if (pick) {
-        onSelect(pick.uuid)
+        onSelect(pick.uuid, pick.finish)
         onClose()
       }
     }
@@ -97,11 +97,11 @@ export function CommandPalette({
           {!isLoading &&
             results.map((r, i) => (
               <button
-                key={r.uuid}
+                key={`${r.uuid}-${r.finish}`}
                 type="button"
                 onMouseEnter={() => setActive(i)}
                 onClick={() => {
-                  onSelect(r.uuid)
+                  onSelect(r.uuid, r.finish)
                   onClose()
                 }}
                 className={`flex w-full items-center gap-3 border-b border-border/40 px-3 py-2 text-left text-[12px] transition-colors ${

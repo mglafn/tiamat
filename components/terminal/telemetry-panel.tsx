@@ -12,11 +12,21 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
   )
 }
 
-export function TelemetryPanel({ uuid }: { uuid: string | null }) {
+export function TelemetryPanel({
+  uuid,
+  selectedFinish = "normal",
+}: {
+  uuid: string | null
+  selectedFinish?: string
+}) {
   const { data: summary } = useSummary(uuid)
-  const { data: forecast } = useForecast(uuid, "tcgplayer", "normal")
   const catalog = useCatalog()
   const name = uuid ? (catalog.get(uuid)?.name ?? shortUuid(uuid)) : null
+
+  // Use the active finish variant selected by the user, falling back to summary's primary finish
+  const targetFinish = selectedFinish || summary?.primary_finish || "normal"
+  const targetVendor = summary?.primary_vendor || "tcgplayer"
+  const { data: forecast } = useForecast(uuid, targetVendor, targetFinish)
 
   // Distribution bar: floor -> avg -> ceiling positioning.
   const dist = summary
@@ -45,7 +55,7 @@ export function TelemetryPanel({ uuid }: { uuid: string | null }) {
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                 <div className="flex justify-between">
                   <span className="text-dim">Finish</span>
-                  <span className="capitalize text-foreground">{summary?.primary_finish ?? "—"}</span>
+                  <span className="capitalize text-foreground">{selectedFinish || summary?.primary_finish || "—"}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-dim">Set</span>
