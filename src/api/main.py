@@ -108,8 +108,9 @@ class CardSearchResult(BaseModel):
     name: str
     set_code: str
     finish: str
-    current_price: float
-
+    floor_price: float
+    avg_price: float
+    vendor_count: int
 # ------------------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------------------
@@ -133,24 +134,28 @@ def search_card_by_name(
     limit: int = Query(20, le=100)
 ):
     """
-    Resolves human-readable card names to system UUIDs across all printings (variants).
-    Executes a Star Schema JOIN between dim_cards and fact_training_dataset.
+    Resolves human-readable card names to unique system UUIDs & printing variants.
+    Aggregates vendor prices to return market floor and average price per SKU.
     """
     if not db_conn:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
+    # Group by UUID + Finish to eliminate duplicate printing rows
     query = """
         SELECT 
             d.uuid, 
             d.name, 
             d.set_code, 
             f.finish,
-            f.current_price
+            MIN(f.current_price) as floor_price,
+            AVG(f.current_price) as avg_price,
+            COUNT(DISTINCT f.vendor) as vendor_count
         FROM dim_cards d
         JOIN fact_training_dataset f ON d.uuid = f.uuid
         WHERE d.name ILIKE ?
           AND f.price_date = (SELECT MAX(price_date) FROM fact_training_dataset)
-        ORDER BY f.current_price DESC
+        GROUP BY d.uuid, d.name, d.set_code, f.finish
+        ORDER BY floor_price DESC
         LIMIT ?
     """
     search_term = f"%{name}%"
@@ -161,11 +166,15 @@ def search_card_by_name(
 
     return [
         CardSearchResult(
-            uuid=r[0], name=r[1], set_code=r[2],
-            finish=r[3], current_price=round(r[4], 2)
+            uuid=r[0], 
+            name=r[1], 
+            set_code=r[2],
+            finish=r[3], 
+            floor_price=round(r[4], 2),
+            avg_price=round(r[5], 2),
+            vendor_count=r[6]
         ) for r in rows
     ]
-
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(2.00, description="Minimum dollar spread threshold"),
