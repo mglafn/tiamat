@@ -19,41 +19,55 @@ except ImportError:
 
 def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
     """
-    Flattens deeply nested MTGJSON dictionaries and yields batches of flat dicts.
+    Flattens deeply nested MTGJSON dictionaries and yields batches of flat dataframes.
+    Extracts both retail and buylist price points across all vendors and finishes.
     """
     records_batch = []
     for uuid, price_data in stream_mtg_prices(str(raw_json_path)):
         if not isinstance(price_data, dict):
             continue
+        
         for card_format, vendors in price_data.items():
             if not isinstance(vendors, dict):
                 continue
+            
             for vendor, vendor_data in vendors.items():
-                if not isinstance(vendor_data, dict) or 'retail' not in vendor_data:
+                if not isinstance(vendor_data, dict):
                     continue
-                retail_data = vendor_data['retail']
-                if not isinstance(retail_data, dict):
-                    continue
-                for finish, date_prices in retail_data.items():
-                    if not isinstance(date_prices, dict):
-                        continue
-                    for date_str, price in date_prices.items():
-                        try:
-                            price_float = float(price)
-                        except (ValueError, TypeError):
-                            continue
 
-                        records_batch.append({
-                            'uuid': str(uuid),
-                            'format': str(card_format),
-                            'vendor': str(vendor),
-                            'finish': str(finish),
-                            'price_date': str(date_str),
-                            'price': price_float
-                        })
-                        if len(records_batch) >= batch_size:
-                            yield pd.DataFrame(records_batch)
-                            records_batch = []
+                # MTGJSON stores both retail and buylist pricing structures
+                for list_type in ['retail', 'buylist']:
+                    if list_type not in vendor_data:
+                        continue
+                    
+                    list_data = vendor_data[list_type]
+                    if not isinstance(list_data, dict):
+                        continue
+                    
+                    for finish, date_prices in list_data.items():
+                        if not isinstance(date_prices, dict):
+                            continue
+                        
+                        for date_str, price in date_prices.items():
+                            try:
+                                price_float = float(price)
+                            except (ValueError, TypeError):
+                                continue
+
+                            records_batch.append({
+                                'uuid': str(uuid),
+                                'format': str(card_format),
+                                'vendor': str(vendor),
+                                'list_type': str(list_type),
+                                'finish': str(finish),
+                                'price_date': str(date_str),
+                                'price': price_float
+                            })
+
+                            if len(records_batch) >= batch_size:
+                                yield pd.DataFrame(records_batch)
+                                records_batch = []
+
     if records_batch:
         yield pd.DataFrame(records_batch)
 
@@ -67,17 +81,18 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     print(f"Ingesting dimension catalog from {posix_path}...")
     conn.execute("DROP TABLE IF EXISTS dim_cards")
     conn.execute(f"""
-            CREATE TABLE dim_cards AS 
-            SELECT 
-                uuid, 
-                name, 
-                COALESCE(setCode, 'OTC') as set_code, 
-                number as collector_number, 
-                rarity,
-                TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank
-            FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
-        """)
+        CREATE TABLE dim_cards AS 
+        SELECT 
+            uuid, 
+            name, 
+            COALESCE(setCode, 'OTC') as set_code, 
+            number as collector_number, 
+            rarity,
+            TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank
+        FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
     count = conn.execute("SELECT COUNT(*) FROM dim_cards").fetchone()[0]
     print(f"Dimension table 'dim_cards' loaded with {count:,} cards.\n")
 
@@ -100,18 +115,20 @@ def main():
     print(f"Connecting to DuckDB at: {db_path}")
     conn = duckdb.connect(str(db_path))
 
-    # 1. Ingest Fact Table
+    # 1. Initialize Fact Table with list_type support
     conn.execute("DROP TABLE IF EXISTS fact_prices")
     conn.execute("""
         CREATE TABLE fact_prices (
             uuid VARCHAR,
             format VARCHAR,
             vendor VARCHAR,
+            list_type VARCHAR,
             finish VARCHAR,
             price_date DATE,
             price DOUBLE
         )
     """)
+    
     print("Beginning DuckDB fact table ingestion...")
     total_rows = 0
     for df_batch in parse_and_batch_records(raw_json_path):
@@ -122,6 +139,7 @@ def main():
                 uuid, 
                 format, 
                 vendor, 
+                list_type,
                 finish, 
                 CAST(price_date AS DATE), 
                 price 
@@ -133,7 +151,12 @@ def main():
 
     print(f"Fact table complete! Total records loaded: {total_rows:,}\n")
 
-    # 2. Ingest Dimension Table
+    # 2. Add high-performance indexes
+    print("Building analytical indexes on fact_prices...")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, vendor, finish, list_type);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
+
+    # 3. Ingest Dimension Table
     if cards_csv_path.exists():
         load_dimension_cards(conn, cards_csv_path)
     else:

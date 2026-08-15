@@ -5,10 +5,11 @@ import type {
   CardVariant,
   HealthCheck,
   PredictionResponse,
+  PriceHistoryPoint,
 } from "./types"
 
 // ---------------------------------------------------------------------------
-// Deterministic pseudo-random helpers (stable output per key => stable UI)
+// Deterministic pseudo-random helpers for stable mock fixtures
 // ---------------------------------------------------------------------------
 function hashSeed(str: string): number {
   let h = 2166136261
@@ -36,14 +37,14 @@ function round(n: number, d = 2): number {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog — realistic secondary-market Magic singles
+// Secondary-Market Catalog Fixtures
 // ---------------------------------------------------------------------------
 interface Seed {
   name: string
   set_code: string
-  base: number // approximate market value (USD)
+  base: number
   finish: "normal" | "foil"
-  vol: number // volatility factor
+  vol: number
   collector_number?: string
   edhrec_rank?: number
 }
@@ -75,7 +76,7 @@ const SEEDS: Seed[] = [
   { name: "Misty Rainforest", set_code: "MH2", base: 26.5, finish: "normal", vol: 0.5, collector_number: "250", edhrec_rank: 19 },
 ]
 
-const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames", "coolstuffinc"]
+const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"]
 
 function makeUuid(seed: Seed, i: number): string {
   const h = hashSeed(`${seed.name}|${seed.set_code}|${seed.finish}|${i}`).toString(16).padStart(8, "0")
@@ -88,19 +89,14 @@ export interface CatalogEntry {
   seed: Seed
 }
 
-// Stable catalog built once at module load.
 export const CATALOG: CatalogEntry[] = SEEDS.map((seed, i) => ({
   uuid: makeUuid(seed, i),
   seed,
 }))
 
 const BY_UUID = new Map(CATALOG.map((c) => [c.uuid, c]))
-
 const TODAY = "2026-08-14"
 
-// ---------------------------------------------------------------------------
-// Per-card derived metrics (deterministic)
-// ---------------------------------------------------------------------------
 interface Metrics {
   current: number
   sma7: number
@@ -119,7 +115,7 @@ function metricsFor(entry: CatalogEntry): Metrics {
   const current = round(base * (1 + drift * 0.14))
   const sma7 = round(current * (1 - (rnd() - 0.5) * 0.05))
   const sma30 = round(current * (1 - (rnd() - 0.5) * 0.11))
-  const dailyReturn = round((rnd() - 0.5) * 6, 3)
+  const dailyReturn = round((rnd() - 0.5) * 6, 2)
   const spreadBand = base * (0.06 + rnd() * 0.1)
   const floor = round(current - spreadBand)
   const ceiling = round(current + spreadBand * (0.8 + rnd()))
@@ -128,19 +124,56 @@ function metricsFor(entry: CatalogEntry): Metrics {
   return { current, sma7, sma30, dailyReturn, floor, ceiling, avg, variants }
 }
 
-// XGBoost-style projection: blend of SMA momentum + mean reversion.
-function predict(m: Metrics, entry: CatalogEntry): { pred: number; mae: number } {
+function predict(m: Metrics, entry: CatalogEntry): { pred: number; gainPct: number; maeDollars: number } {
   const momentum = (m.sma7 - m.sma30) / Math.max(m.sma30, 1)
   const rnd = mulberry32(hashSeed(entry.uuid + "pred"))
-  const projected = m.current * (1 + momentum * 1.6 + (rnd() - 0.45) * 0.05)
-  return { pred: round(projected), mae: 0.182 }
+  const gainPct = round(momentum * 100.0 * 0.85 + (rnd() - 0.45) * 6.0, 2)
+  const pred = round(Math.max(0.01, m.current * (1 + gainPct / 100.0)))
+  const maeDollars = round(m.current * 0.048, 2)
+  return { pred, gainPct, maeDollars }
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint builders
+// Mock Endpoint Handlers
 // ---------------------------------------------------------------------------
 export function mockHealth(): HealthCheck {
   return { status: "healthy", db_connected: true, model_loaded: true }
+}
+
+export function mockHistory(uuid: string, days = 60): PriceHistoryPoint[] {
+  const entry = BY_UUID.get(uuid)
+  const basePrice = entry?.seed.base ?? 25.0
+  const rnd = mulberry32(hashSeed(uuid + "hist_feed"))
+  
+  const rawPrices: number[] = []
+  let cur = basePrice * (0.94 + rnd() * 0.12)
+  for (let i = 0; i < days; i++) {
+    const shock = (rnd() - 0.49) * basePrice * 0.03
+    cur = Math.max(0.25, cur + shock)
+    rawPrices.push(round(cur))
+  }
+  
+  const sma = (arr: number[], idx: number, win: number) => {
+    const start = Math.max(0, idx - win + 1)
+    const slice = arr.slice(start, idx + 1)
+    return round(slice.reduce((a, b) => a + b, 0) / slice.length)
+  }
+
+  const baseDate = new Date(TODAY)
+  return rawPrices.map((p, i) => {
+    const d = new Date(baseDate)
+    d.setDate(d.getDate() - (days - 1 - i))
+    const prev = i > 0 ? rawPrices[i - 1] : p
+    const dailyReturn = prev > 0 ? round(((p - prev) / prev) * 100, 2) : 0.0
+
+    return {
+      price_date: d.toISOString().split("T")[0],
+      price: p,
+      sma_7: sma(rawPrices, i, 7),
+      sma_30: sma(rawPrices, i, 30),
+      daily_return_pct: dailyReturn,
+    }
+  })
 }
 
 export function mockPrintings(uuid: string): CardVariant[] {
@@ -165,11 +198,11 @@ export function mockPrintings(uuid: string): CardVariant[] {
 export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpportunity[] {
   const rows: ArbitrageOpportunity[] = CATALOG.map((entry) => {
     const m = metricsFor(entry)
-    const rnd = mulberry32(hashSeed(entry.uuid + "arb"))
-    const tcg = round(m.current * (0.96 + rnd() * 0.03))
-    const ck = round(tcg * (1.08 + rnd() * 0.24))
-    const spread = round(ck - tcg)
-    const pct = round((spread / tcg) * 100)
+    const rnd = mulberry32(hashSeed(entry.uuid + "arb_feed"))
+    const tcg = round(m.current * (0.95 + rnd() * 0.04))
+    const ckBuylist = round(tcg * (1.18 + rnd() * 0.18))
+    const netSpread = round(ckBuylist - (tcg * 1.10 + 1.00))
+    const pct = tcg > 0 ? round((netSpread / (tcg * 1.10 + 1.00)) * 100) : 0
     return {
       uuid: entry.uuid,
       name: entry.seed.name,
@@ -178,8 +211,8 @@ export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpport
       price_date: TODAY,
       finish: entry.seed.finish,
       tcg_price: tcg,
-      ck_price: ck,
-      price_spread: spread,
+      ck_price: ckBuylist,
+      price_spread: netSpread,
       spread_pct: pct,
     }
   })
@@ -193,8 +226,7 @@ export function mockForecast(uuid: string, vendor: string, finish: string): Pred
   const entry = BY_UUID.get(uuid)
   if (!entry) return null
   const m = metricsFor(entry)
-  const { pred, mae } = predict(m, entry)
-  const gain = m.current > 0 ? round(((pred - m.current) / m.current) * 100) : 0
+  const { pred, gainPct, maeDollars } = predict(m, entry)
   const normalized = ["nonfoil", "regular"].includes(finish.toLowerCase()) ? "normal" : finish.toLowerCase()
   return {
     uuid,
@@ -202,8 +234,9 @@ export function mockForecast(uuid: string, vendor: string, finish: string): Pred
     finish: normalized,
     current_price: m.current,
     predicted_7d_price: pred,
-    predicted_gain_pct: gain,
-    model_mae: mae,
+    predicted_gain_pct: gainPct,
+    model_mae: maeDollars,
+    directional_accuracy_pct: 68.4,
   }
 }
 
@@ -211,9 +244,8 @@ export function mockSummary(uuid: string): CardMarketSummary | null {
   const entry = BY_UUID.get(uuid)
   if (!entry) return null
   const m = metricsFor(entry)
-  const { pred } = predict(m, entry)
-  const gain = m.current > 0 ? round(((pred - m.current) / m.current) * 100) : 0
-  const rnd = mulberry32(hashSeed(uuid + "vendor"))
+  const { pred, gainPct } = predict(m, entry)
+  const rnd = mulberry32(hashSeed(uuid + "summary_vendor"))
   const rank = entry.seed.edhrec_rank ?? (25 + Math.floor(rnd() * 1800))
   return {
     uuid,
@@ -229,7 +261,7 @@ export function mockSummary(uuid: string): CardMarketSummary | null {
     primary_vendor: VENDORS[Math.floor(rnd() * VENDORS.length)],
     primary_finish: entry.seed.finish,
     predicted_7d_price: pred,
-    predicted_gain_pct: gain,
+    predicted_gain_pct: gainPct,
   }
 }
 
@@ -245,13 +277,12 @@ export function mockSearch(name: string, limit: number): CardSearchResult[] {
       finish: entry.seed.finish,
       floor_price: m.floor,
       avg_price: m.avg,
-      vendor_count: 2 + Math.floor(mulberry32(hashSeed(entry.uuid + "vc"))() * 3),
+      vendor_count: 2 + Math.floor(mulberry32(hashSeed(entry.uuid + "vc_feed"))() * 3),
     }
   })
   return results.sort((a, b) => b.floor_price - a.floor_price).slice(0, limit)
 }
 
-// Catalog lookup for client-side name resolution (arbitrage rows carry only uuid).
 export function mockCatalog() {
   return CATALOG.map((e) => ({ uuid: e.uuid, name: e.seed.name, set_code: e.seed.set_code }))
 }

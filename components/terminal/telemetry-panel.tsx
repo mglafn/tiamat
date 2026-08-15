@@ -24,19 +24,19 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
   const { data: forecast } = useForecast(uuid, "tcgplayer", selectedFinish)
   const { printings } = usePrintings(uuid)
 
-  // Hydrate directly from summary payload
   const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const setCode = summary?.set_code ?? "—"
   const collectorNum = summary?.collector_number ? `#${summary.collector_number}` : ""
   const edhrecRank = summary?.edhrec_rank
 
-  // Distribution bar: floor -> avg -> ceiling positioning
+  // Distribution bar positioning: floor -> avg -> ceiling
   const hasValidPriceRange =
     summary != null &&
     summary.floor_price != null &&
     summary.ceiling_price != null &&
     summary.ceiling_price > 0
 
+  const spreadDiff = (summary?.ceiling_price ?? 0) - (summary?.floor_price ?? 0)
   const dist =
     hasValidPriceRange && summary
       ? {
@@ -45,9 +45,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
             100,
             Math.max(
               0,
-              ((summary.avg_price - summary.floor_price) /
-                Math.max(summary.ceiling_price - summary.floor_price, 0.01)) *
-                100
+              ((summary.avg_price - summary.floor_price) / Math.max(spreadDiff, 0.01)) * 100
             )
           ),
           ceilPos: 100,
@@ -61,11 +59,11 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {!uuid && <p className="text-[11px] text-dim">No SKU selected.</p>}
+        {!uuid && <p className="text-[11px] text-dim">No asset selected.</p>}
 
         {uuid && (
           <>
-            {/* Selected SKU card */}
+            {/* Selected SKU Metadata */}
             <div className="rounded-sm border border-border-strong bg-surface p-2.5">
               <div className="flex items-center justify-between text-[10px] uppercase text-dim">
                 <span>Selected SKU</span>
@@ -98,7 +96,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             </div>
 
-            {/* Scryfall-Style Available Printings & Multi-Variant Table */}
+            {/* Available Printings */}
             {printings.length > 0 && (
               <div className="mt-3">
                 <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
@@ -128,7 +126,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                           <span className="font-semibold">{p.set_code}</span>
                         </div>
 
-                        {/* Distinct styling for active price vs true $0.00 vs NO DATA */}
                         {hasPrice ? (
                           <span
                             className={`tnum font-mono text-[11px] ${
@@ -149,7 +146,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Price distribution */}
+            {/* Price Distribution */}
             {summary && dist && (
               <div className="mt-3">
                 <div className="mb-1.5 text-[10px] uppercase text-dim">Vendor Price Distribution</div>
@@ -183,36 +180,45 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Model inference */}
+            {/* Model Inference Telemetry */}
             {forecast && (
               <div className="mt-3">
-                <div className="mb-1.5 text-[10px] uppercase text-dim">XGBoost Inference</div>
-                <Row label="Current" value={usd(forecast.current_price)} />
-                <Row label="Predicted 7D" value={usd(forecast.predicted_7d_price)} tone="text-forecast" />
+                <div className="mb-1.5 text-[10px] uppercase text-dim">XGBoost Inference Telemetry</div>
+                <Row label="Current Close" value={usd(forecast.current_price)} />
+                <Row label="Projected 7D" value={usd(forecast.predicted_7d_price)} tone="text-forecast font-medium" />
                 <Row
-                  label="Expected Gain"
+                  label="Expected Return"
                   value={pct(forecast.predicted_gain_pct)}
-                  tone={forecast.predicted_gain_pct >= 0 ? "text-up" : "text-down"}
+                  tone={forecast.predicted_gain_pct >= 0 ? "text-up font-medium" : "text-down font-medium"}
                 />
-                <Row label="Model MAE" value={usd(forecast.model_mae)} tone="text-muted-foreground" />
+                <Row label="Error Bound (MAE)" value={`±${usd(forecast.model_mae)}`} tone="text-muted-foreground" />
+                {forecast.directional_accuracy_pct != null && (
+                  <Row 
+                    label="Directional Accuracy" 
+                    value={`${forecast.directional_accuracy_pct}%`} 
+                    tone="text-accent" 
+                  />
+                )}
               </div>
             )}
 
-            {/* Confidence gauge */}
+            {/* Confidence / Action Signal */}
             {forecast && (
               <div className="mt-3 rounded-sm border border-border bg-surface/50 p-2.5">
                 <div className="flex items-center justify-between text-[10px] uppercase">
-                  <span className="text-dim">Signal</span>
-                  <span className={forecast.predicted_gain_pct >= 0 ? "text-up" : "text-down"}>
-                    {forecast.predicted_gain_pct >= 5
-                      ? "STRONG BUY"
-                      : forecast.predicted_gain_pct >= 0
+                  <span className="text-dim">Execution Signal</span>
+                  <span className={forecast.predicted_gain_pct >= 0 ? "text-up font-semibold" : "text-down font-semibold"}>
+                    {forecast.predicted_gain_pct >= 6.0
+                      ? "STRONG ACCUMULATE"
+                      : forecast.predicted_gain_pct >= 1.5
                         ? "ACCUMULATE"
-                        : "REDUCE"}
+                        : forecast.predicted_gain_pct > -2.0
+                          ? "NEUTRAL HOLD"
+                          : "REDUCE EXPOSURE"}
                   </span>
                 </div>
                 <p className="mt-1 text-[10px] leading-relaxed text-dim">
-                  7-day forward projection derived from SMA-7/SMA-30 momentum and daily-return features.
+                  7-day forward return momentum derived from stationary SMA cross ratios and 14-day rolling volatility.
                 </p>
               </div>
             )}

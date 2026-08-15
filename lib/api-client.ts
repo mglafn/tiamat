@@ -3,6 +3,7 @@ import {
   mockCatalog,
   mockForecast,
   mockHealth,
+  mockHistory,
   mockPrintings,
   mockSearch,
   mockSummary,
@@ -15,16 +16,16 @@ import type {
   CatalogCard,
   HealthCheck,
   PredictionResponse,
+  PriceHistoryPoint,
 } from "./types"
 
-// Generic fetcher that catches network failures and seamlessly returns mock data
+// Generic fetcher that catches network failures and returns fallback mock data when the backend is offline
 async function fetchWithFallback<T>(url: string, fallbackFactory: () => T): Promise<T> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(3500) })
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json()
   } catch {
-    // API is offline (e.g. running on Vercel demo mode) -> serve deterministic mock data
     return fallbackFactory()
   }
 }
@@ -40,6 +41,12 @@ export const apiClient = {
     fetchWithFallback<ArbitrageOpportunity[]>(
       `/api/v1/arbitrage?min_spread=${minSpread}&limit=${limit}`,
       () => mockArbitrage(minSpread, limit)
+    ),
+
+  getHistory: (uuid: string, vendor = "tcgplayer", finish = "normal", days = 60) =>
+    fetchWithFallback<PriceHistoryPoint[]>(
+      `/api/v1/card/history/${uuid}?vendor=${encodeURIComponent(vendor)}&finish=${encodeURIComponent(finish)}&days=${days}`,
+      () => mockHistory(uuid, days)
     ),
 
   getForecast: (uuid: string, vendor: string, finish: string) =>
@@ -67,7 +74,7 @@ export const apiClient = {
     ),
 
   getCatalog: () =>
-    fetchWithFallback<{ source: string; cards: CatalogCard[] }>(
+    fetchWithFallback<CatalogCard[] | { source: string; cards: CatalogCard[] }>(
       "/api/v1/catalog",
       () => ({ source: "mock", cards: mockCatalog() })
     ),

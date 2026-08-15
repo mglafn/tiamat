@@ -1,5 +1,6 @@
 // lib/hooks.ts
 "use client"
+
 import useSWR from "swr"
 import { apiClient } from "./api-client"
 import type {
@@ -10,6 +11,7 @@ import type {
   CatalogCard,
   HealthCheck,
   PredictionResponse,
+  PriceHistoryPoint,
 } from "./types"
 
 export type HealthPayload = HealthCheck & { source: "live" | "mock" }
@@ -48,6 +50,23 @@ export function useArbitrage(minSpread: number, finish: string) {
   }
 
   return { rows, error, isLoading, isValidating, mutate }
+}
+
+export function useHistory(
+  uuid: string | null, 
+  vendor: string = "tcgplayer", 
+  finish: string = "normal", 
+  days: number = 60
+) {
+  return useSWR<PriceHistoryPoint[]>(
+    uuid ? [`history`, uuid, vendor, finish, days] : null,
+    () => (uuid ? apiClient.getHistory(uuid, vendor, finish, days) : []),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+      dedupingInterval: 5000,
+    }
+  )
 }
 
 export function useForecast(uuid: string | null, vendor: string, finish: string) {
@@ -98,12 +117,17 @@ export function useSearch(query: string) {
 }
 
 export function useCatalog() {
-  const { data } = useSWR<{ source: string; cards: CatalogCard[] }>("catalog-map", () => apiClient.getCatalog(), {
-    revalidateOnFocus: false,
-    keepPreviousData: true,
-  })
+  const { data } = useSWR<CatalogCard[] | { source: string; cards: CatalogCard[] }>(
+    "catalog-map", 
+    () => apiClient.getCatalog(), 
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    }
+  )
   
   const map = new Map<string, CatalogCard>()
-  for (const c of data?.cards ?? []) map.set(c.uuid, c)
+  const list = Array.isArray(data) ? data : (data?.cards ?? [])
+  for (const c of list) map.set(c.uuid, c)
   return map
 }

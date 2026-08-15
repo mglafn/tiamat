@@ -1,5 +1,5 @@
 // lib/types.ts
-// Mirrors the FastAPI Pydantic response schemas and client-side data structures.
+// Strictly mirrors FastAPI Pydantic response schemas and client-side data contracts.
 
 export interface HealthCheck {
   status: string
@@ -7,19 +7,34 @@ export interface HealthCheck {
   model_loaded: boolean
 }
 
+export interface CatalogCard {
+  uuid: string
+  name: string
+  set_code: string
+  collector_number?: string | null
+}
+
 export interface CardVariant {
   uuid: string
   set_code: string
-  collector_number?: string
+  collector_number?: string | null
   floor_price?: number | null
   edhrec_rank?: number | null
+}
+
+export interface PriceHistoryPoint {
+  price_date: string
+  price: number
+  sma_7?: number | null
+  sma_30?: number | null
+  daily_return_pct?: number | null
 }
 
 export interface ArbitrageOpportunity {
   uuid: string
   name?: string
   set_code?: string
-  collector_number?: string
+  collector_number?: string | null
   price_date: string
   finish: string
   tcg_price: number
@@ -36,13 +51,14 @@ export interface PredictionResponse {
   predicted_7d_price: number
   predicted_gain_pct: number
   model_mae: number
+  directional_accuracy_pct?: number | null
 }
 
 export interface CardMarketSummary {
   uuid: string
   name: string
   set_code: string
-  collector_number?: string
+  collector_number?: string | null
   edhrec_rank?: number | null
   latest_price_date: string
   total_market_variants: number
@@ -59,17 +75,9 @@ export interface CardSearchResult {
   uuid: string
   name: string
   set_code: string
-  collector_number?: string
+  collector_number?: string | null
   finish: string
   floor_price: number
   avg_price: number
   vendor_count: number
-}
-
-// Client-only enrichment: used for resolving names and set numbers in the terminal
-export interface CatalogCard {
-  uuid: string
-  name: string
-  set_code: string
-  collector_number?: string
 }

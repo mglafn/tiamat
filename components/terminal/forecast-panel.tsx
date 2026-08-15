@@ -1,16 +1,17 @@
 "use client"
+
 import { useMemo, useState } from "react"
 import { Crosshair, Loader2, TrendingDown, TrendingUp } from "lucide-react"
-import { useForecast, useSummary } from "@/lib/hooks"
-import { buildDrift, type DriftPoint } from "@/lib/series"
+import { useForecast, useHistory, useSummary } from "@/lib/hooks"
+import { buildTimeSeries, type DriftPoint } from "@/lib/series"
 import { usd, pct, shortUuid } from "@/lib/format"
 
 const W = 820
 const H = 340
-const padL = 48
-const padR = 14
-const padT = 16
-const padB = 24
+const padL = 52
+const padR = 16
+const padT = 18
+const padB = 26
 const FINISHES = ["normal", "foil"] as const
 const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"] as const
 
@@ -26,35 +27,42 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
   const setFinish = onFinishChange
   
   const { data: forecast, error: forecastError, isLoading: forecastLoading } = useForecast(uuid, vendor, finish)
+  const { data: history = [], error: historyError, isLoading: historyLoading } = useHistory(uuid, vendor, finish, 45)
   const { data: summary, error: summaryError, isLoading: summaryLoading } = useSummary(uuid)
   
-  const isLoading = forecastLoading || summaryLoading
-  const isError = forecastError || summaryError
+  const isLoading = forecastLoading || historyLoading || summaryLoading
+  const isError = forecastError || historyError || summaryError
 
   const points = useMemo<DriftPoint[]>(() => {
-    if (!uuid || !forecast) return []
-    return buildDrift(uuid, forecast, summary)
-  }, [uuid, forecast, summary])
+    if (!uuid || history.length === 0) return []
+    return buildTimeSeries(history, forecast ?? null)
+  }, [uuid, history, forecast])
 
   const geom = useMemo(() => {
     if (points.length === 0) return null
     const vals: number[] = []
     for (const p of points) {
       for (const v of [p.actual, p.sma7, p.sma30, p.forecast, p.upper, p.lower]) {
-        if (v != null) vals.push(v)
+        if (v != null && !isNaN(v) && v > 0) vals.push(v)
       }
     }
+    if (vals.length === 0) return null
+
     const min = Math.min(...vals)
     const max = Math.max(...vals)
-    const pad = (max - min) * 0.12 || max * 0.1
-    const lo = min - pad
+    const pad = (max - min) * 0.14 || max * 0.1
+    const lo = Math.max(0.01, min - pad)
     const hi = max + pad
     const plotW = W - padL - padR
     const plotH = H - padT - padB
     const n = points.length
+    
     const x = (i: number) => padL + (i / (n - 1)) * plotW
     const y = (val: number) => padT + (1 - (val - lo) / (hi - lo)) * plotH
+    
     const nowIdx = points.findIndex((p) => p.day === 0)
+    const safeNowIdx = nowIdx === -1 ? points.length - 1 : nowIdx
+
     const line = (key: keyof DriftPoint) =>
       points
         .map((p, i) => (p[key] == null ? null : `${x(i)},${y(p[key] as number)}`))
@@ -64,30 +72,32 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
     const upper = points.filter((p) => p.upper != null)
     const lower = points.filter((p) => p.lower != null)
     let cone = ""
-    if (upper.length) {
-      const nowX = x(nowIdx)
-      const nowY = y(points[nowIdx].actual as number)
+    if (upper.length && lower.length && points[safeNowIdx]?.forecast != null) {
+      const nowX = x(safeNowIdx)
+      const nowY = y(points[safeNowIdx].forecast as number)
       const up = upper.map((p) => `${x(points.indexOf(p))},${y(p.upper as number)}`)
       const lowRev = [...lower].reverse().map((p) => `${x(points.indexOf(p))},${y(p.lower as number)}`)
       cone = `${nowX},${nowY} ${up.join(" ")} ${lowRev.join(" ")}`
     }
+
     const ticks = 5
     const yTicks = Array.from({ length: ticks }, (_, i) => {
       const val = lo + ((hi - lo) * i) / (ticks - 1)
       return { val, y: y(val) }
     })
+
     const xLabels = points
       .filter((_, i) => i % 8 === 0 || points[i].day === 0)
       .map((p) => ({ x: x(points.indexOf(p)), label: p.day === 0 ? "NOW" : p.date, now: p.day === 0 }))
-    return { x, y, nowIdx, line, cone, yTicks, xLabels }
+
+    return { x, y, safeNowIdx, line, cone, yTicks, xLabels }
   }, [points])
 
-  // Hydrate directly from summary payload
   const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const gainPositive = (forecast?.predicted_gain_pct ?? 0) >= 0
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical drift">
+    <section className="flex h-full min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical series">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-strong bg-surface px-3 py-1.5">
         <div className="flex items-baseline gap-2">
@@ -100,13 +110,18 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
           )}
         </div>
         <div className="flex items-center gap-2 text-[10px] uppercase">
+          {forecast?.directional_accuracy_pct != null && (
+            <span className="hidden text-dim lg:inline">
+              Acc: <span className="tnum text-foreground font-semibold">{forecast.directional_accuracy_pct}%</span>
+            </span>
+          )}
           {isError ? (
             <span className="flex items-center gap-1 font-mono text-down">
-              ERROR
+              DATA OFFLINE
             </span>
           ) : isLoading ? (
             <span className="flex items-center gap-1 font-mono text-accent">
-              <Loader2 className="h-3 w-3 animate-spin" /> INFERRING
+              <Loader2 className="h-3 w-3 animate-spin" /> FETCHING
             </span>
           ) : null}
           <div className="flex overflow-hidden rounded-sm border border-border">
@@ -145,49 +160,49 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
         )}
         {uuid && isError && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-down">Inference Error</span>
-            <span className="text-[10px] text-dim">Failed to fetch forecast from service</span>
+            <span className="font-mono text-[11px] uppercase tracking-wider text-down">Query Error</span>
+            <span className="text-[10px] text-dim">Unable to fetch verified time series for this variant</span>
           </div>
         )}
         {uuid && (isLoading || !geom) && !isError && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
             <Loader2 className="h-6 w-6 animate-spin text-accent" />
-            <span className="font-mono text-[11px] uppercase tracking-wider text-accent">Running XGBoost 7-Day Inference…</span>
-            <span className="text-[10px] text-dim">Synthesizing SMA-7/30 momentum and DuckDB historical drift</span>
+            <span className="font-mono text-[11px] uppercase tracking-wider text-accent">Loading Historical Observations…</span>
+            <span className="text-[10px] text-dim">Syncing DuckDB time series and XGBoost inference targets</span>
           </div>
         )}
         {uuid && !isLoading && !isError && geom && (
-          <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price drift and forecast chart">
-            {/* Gridlines */}
+          <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price history and forecast chart">
+            {/* Horizontal Gridlines */}
             {geom.yTicks.map((t, i) => (
               <g key={i}>
                 <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="var(--border)" strokeWidth={0.5} />
                 <text x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-dim" fontSize={9}>
-                  ${t.val.toFixed(t.val >= 100 ? 0 : 1)}
+                  ${t.val.toFixed(t.val >= 100 ? 0 : 2)}
                 </text>
               </g>
             ))}
             {/* Forecast region shade */}
-            <rect x={geom.x(geom.nowIdx)} y={padT} width={W - padR - geom.x(geom.nowIdx)} height={H - padT - padB} fill="var(--accent)" opacity={0.04} />
-            {/* MAE uncertainty cone */}
+            <rect x={geom.x(geom.safeNowIdx)} y={padT} width={Math.max(0, W - padR - geom.x(geom.safeNowIdx))} height={H - padT - padB} fill="var(--accent)" opacity={0.04} />
+            {/* Uncertainty Cone */}
             {geom.cone && <polygon points={geom.cone} fill="var(--forecast)" opacity={0.16} />}
             {/* SMA-30 */}
-            <polyline points={geom.line("sma30")} fill="none" stroke="var(--sma30)" strokeWidth={1} strokeDasharray="1 2" />
+            <polyline points={geom.line("sma30")} fill="none" stroke="var(--sma30)" strokeWidth={1} strokeDasharray="2 2" />
             {/* SMA-7 */}
             <polyline points={geom.line("sma7")} fill="none" stroke="var(--sma7)" strokeWidth={1.25} />
             {/* Historical actuals */}
             <polyline points={geom.line("actual")} fill="none" stroke="var(--hist)" strokeWidth={1.5} />
-            {/* Forecast */}
+            {/* Forecast line */}
             <polyline points={geom.line("forecast")} fill="none" stroke="var(--forecast)" strokeWidth={2} strokeDasharray="4 3" strokeLinecap="round" />
-            {/* NOW divider */}
-            <line x1={geom.x(geom.nowIdx)} y1={padT} x2={geom.x(geom.nowIdx)} y2={H - padB} stroke="var(--border-strong)" strokeWidth={1} strokeDasharray="2 2" />
-            {/* Endpoint marker */}
-            {forecast && (
-              <circle cx={geom.x(points.length - 1)} cy={geom.y(forecast.predicted_7d_price)} r={3} fill="var(--forecast)" stroke="var(--background)" strokeWidth={1} />
+            {/* NOW vertical divider */}
+            <line x1={geom.x(geom.safeNowIdx)} y1={padT} x2={geom.x(geom.safeNowIdx)} y2={H - padB} stroke="var(--border-strong)" strokeWidth={1} strokeDasharray="2 2" />
+            {/* 7D Target Endpoint marker */}
+            {forecast && points.length > 0 && (
+              <circle cx={geom.x(points.length - 1)} cy={geom.y(forecast.predicted_7d_price)} r={3.5} fill="var(--forecast)" stroke="var(--background)" strokeWidth={1} />
             )}
-            {/* X labels */}
+            {/* X-axis labels */}
             {geom.xLabels.map((l, i) => (
-              <text key={i} x={l.x} y={H - 8} textAnchor="middle" fontSize={9} className={l.now ? "fill-accent" : "fill-dim"}>
+              <text key={i} x={l.x} y={H - 8} textAnchor="middle" fontSize={9} className={l.now ? "fill-accent font-semibold" : "fill-dim"}>
                 {l.label}
               </text>
             ))}
@@ -195,7 +210,7 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
         )}
       </div>
 
-      {/* Legend + targets */}
+      {/* Legend & Target Footer */}
       {forecast && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border bg-surface/50 px-3 py-1.5 text-[10px] uppercase">
           <Legend color="var(--hist)" label="Actual" />
@@ -203,9 +218,9 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
           <Legend color="var(--sma30)" label="SMA-30" dashed />
           <Legend color="var(--forecast)" label="XGB 7D" dashed />
           <span className="ml-auto flex items-center gap-2">
-            <span className="text-dim">7D Target</span>
-            <span className="tnum text-forecast">{usd(forecast.predicted_7d_price)}</span>
-            <span className={`tnum flex items-center gap-0.5 ${gainPositive ? "text-up" : "text-down"}`}>
+            <span className="text-dim">7D Projected</span>
+            <span className="tnum text-forecast font-medium">{usd(forecast.predicted_7d_price)}</span>
+            <span className={`tnum flex items-center gap-0.5 font-medium ${gainPositive ? "text-up" : "text-down"}`}>
               {gainPositive ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
               {pct(forecast.predicted_gain_pct)}
             </span>

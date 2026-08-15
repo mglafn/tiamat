@@ -2,31 +2,28 @@ import os
 from pathlib import Path
 import duckdb
 
-def compute_financial_indicators(db_path):
+def compute_financial_indicators(db_path: str):
     base_dir = Path(__file__).resolve().parent.parent.parent
     tmp_dir = base_dir / "data" / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     
     conn = duckdb.connect(db_path)
-    print("Configuring DuckDB memory limits and disk-spilling...")
+    print("Configuring DuckDB memory limits and scratch space...")
     
-    conn.execute("PRAGMA threads = 2;")
+    conn.execute("PRAGMA threads = 4;")
     conn.execute(f"PRAGMA temp_directory = '{tmp_dir.as_posix()}';")
-    conn.execute("SET memory_limit = '3GB';")
+    conn.execute("SET memory_limit = '4GB';")
     
-    print("Building advanced quantitative features in DuckDB...")
+    print("Building quantitative feature store in DuckDB...")
     
-    # 1. Feature Store with Momentum, Volatility & Demand Signals
+    # --------------------------------------------------------------------------
+    # 1. FEATURE STORE (Momentum, Volatility & Categorical Encodings)
+    # --------------------------------------------------------------------------
     conn.execute("""
         CREATE OR REPLACE TABLE fact_card_features AS
-        WITH recent_prices AS (
+        WITH filtered_prices AS (
             SELECT 
-                p.uuid,
-                p.vendor,
-                p.finish,
-                p.price_date,
-                p.price,
-                -- Categorical encoding from dim_cards
+                p.uuid, p.vendor, p.finish, p.price_date, p.price,
                 COALESCE(d.edhrec_rank, 50000) AS edhrec_rank,
                 CASE 
                     WHEN LOWER(d.rarity) = 'mythic' THEN 4
@@ -39,133 +36,150 @@ def compute_financial_indicators(db_path):
             FROM fact_prices p
             LEFT JOIN dim_cards d ON p.uuid = d.uuid
             WHERE p.format = 'paper' 
-              AND p.price_date >= (SELECT COALESCE(MAX(price_date), CURRENT_DATE) - INTERVAL '180 days' FROM fact_prices)
+              AND p.list_type = 'retail'
+              AND p.price > 0
+              AND p.price_date >= (
+                  SELECT COALESCE(MAX(price_date), CURRENT_DATE) - INTERVAL '365 days' 
+                  FROM fact_prices
+              )
+        ),
+        daily_returns AS (
+            SELECT *,
+                LAG(price, 1) OVER (PARTITION BY uuid, vendor, finish ORDER BY price_date) AS prev_price_1d
+            FROM filtered_prices
+        ),
+        base_features AS (
+            SELECT *,
+                CASE WHEN prev_price_1d > 0 THEN ((price - prev_price_1d) / prev_price_1d) * 100.0 ELSE 0.0 END AS daily_return_pct
+            FROM daily_returns
         ),
         windowed AS (
-            SELECT 
-                uuid,
-                vendor,
-                finish,
-                price_date,
-                price,
-                edhrec_rank,
-                rarity_score,
-                is_foil,
-                -- 1-day & 7-day price lags
-                LAG(price, 1) OVER (PARTITION BY uuid, vendor, finish ORDER BY price_date) AS prev_price_1d,
-                LAG(price, 7) OVER (PARTITION BY uuid, vendor, finish ORDER BY price_date) AS prev_price_7d,
-                -- 7-Row & 30-Row Moving Averages
+            SELECT *,
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL 6 DAYS PRECEDING AND CURRENT ROW
                 ) AS sma_7,
                 AVG(price) OVER (
                     PARTITION BY uuid, vendor, finish 
                     ORDER BY price_date 
-                    ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL 29 DAYS PRECEDING AND CURRENT ROW
                 ) AS sma_30,
-                -- 14-Row Rolling Standard Deviation (Volatility Metric)
+                -- Fixed: 14-Day Rolling Volatility calculated on Returns, not Absolute Price
                 COALESCE(
-                    STDDEV_SAMP(price) OVER (
+                    STDDEV_SAMP(daily_return_pct) OVER (
                         PARTITION BY uuid, vendor, finish 
                         ORDER BY price_date 
-                        ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
+                        RANGE BETWEEN INTERVAL 13 DAYS PRECEDING AND CURRENT ROW
                     ), 
                     0.0
-                ) AS volatility_14d
-            FROM recent_prices
+                ) AS volatility_14d,
+                -- Fixed: Time-based 7-day velocity approximation
+                FIRST_VALUE(price) OVER (
+                    PARTITION BY uuid, vendor, finish
+                    ORDER BY price_date
+                    RANGE BETWEEN INTERVAL 7 DAYS PRECEDING AND CURRENT ROW
+                ) AS prev_price_7d_approx
+            FROM base_features
         )
         SELECT 
-            uuid,
-            vendor,
-            finish,
-            price_date,
-            price AS current_price,
-            sma_7,
-            sma_30,
-            -- Momentum Oscillator: SMA Cross Ratio
-            CASE WHEN sma_30 > 0 THEN (sma_7 / sma_30) ELSE 1.0 END AS sma_ratio,
-            -- Rolling Volatility
-            volatility_14d,
-            -- Daily Return %
-            CASE 
-                WHEN prev_price_1d > 0 THEN ((price - prev_price_1d) / prev_price_1d) * 100
-                ELSE 0.0 
-            END AS daily_return_pct,
-            -- 7-Day Velocity %
-            CASE 
-                WHEN prev_price_7d > 0 THEN ((price - prev_price_7d) / prev_price_7d) * 100
-                ELSE 0.0 
-            END AS velocity_7d_pct,
-            -- Categoricals
-            is_foil,
-            rarity_score,
-            edhrec_rank
+            uuid, vendor, finish, price_date, price AS current_price,
+            ROUND(sma_7, 4) AS sma_7,
+            ROUND(sma_30, 4) AS sma_30,
+            ROUND(CASE WHEN sma_30 > 0 THEN (sma_7 / sma_30) ELSE 1.0 END, 4) AS sma_ratio,
+            ROUND(volatility_14d, 4) AS volatility_14d,
+            ROUND(daily_return_pct, 4) AS daily_return_pct,
+            ROUND(
+                CASE 
+                    WHEN prev_price_7d_approx > 0 THEN ((price - prev_price_7d_approx) / prev_price_7d_approx) * 100.0
+                    ELSE 0.0 
+                END, 4
+            ) AS velocity_7d_pct,
+            is_foil, rarity_score, edhrec_rank
         FROM windowed;
     """)
     
-    # 2. Build ML Training Dataset with 7-Day Target
-    print("Generating ML Training Dataset (Lead Window)...")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_features_lookup ON fact_card_features(uuid, vendor, finish, price_date);")
+
+    # --------------------------------------------------------------------------
+    # 2. ML TRAINING DATASET (True 7-Day Calendar Forward Returns)
+    # --------------------------------------------------------------------------
+    print("Generating ML training dataset with calendar-aligned 7-day targets...")
     conn.execute("""
         CREATE OR REPLACE TABLE fact_training_dataset AS
-        SELECT 
-            uuid,
-            vendor,
-            finish,
-            price_date,
-            current_price,
-            sma_7,
-            sma_30,
-            sma_ratio,
-            volatility_14d,
-            daily_return_pct,
-            velocity_7d_pct,
-            is_foil,
-            rarity_score,
-            edhrec_rank,
-            LEAD(current_price, 7) OVER (
-                PARTITION BY uuid, vendor, finish 
-                ORDER BY price_date
-            ) AS target_price_7d
-        FROM fact_card_features;
-    """)
-    
-    # 3. Cross-Vendor Arbitrage View
-    print("Materializing Cross-Vendor Arbitrage Opportunities...")
-    conn.execute("""
-        CREATE OR REPLACE TABLE fact_arbitrage_opportunities AS
-        WITH vendor_pivoted AS (
+        WITH temporal_targets AS (
             SELECT 
-                uuid,
-                price_date,
-                finish,
-                MIN(CASE WHEN vendor = 'tcgplayer' THEN price END) AS tcg_price,
-                MIN(CASE WHEN vendor = 'cardkingdom' THEN price END) AS ck_price
-            FROM fact_prices
-            WHERE format = 'paper'
-              AND price_date = (SELECT MAX(price_date) FROM fact_prices)
-            GROUP BY uuid, price_date, finish
+                t1.*,
+                t2.current_price AS future_price_7d
+            FROM fact_card_features t1
+            -- Fixed: ASOF JOIN strictly matches the closest future date >= 7 days ahead
+            ASOF LEFT JOIN fact_card_features t2 
+              ON t1.uuid = t2.uuid 
+             AND t1.vendor = t2.vendor 
+             AND t1.finish = t2.finish 
+             AND t2.price_date >= t1.price_date + INTERVAL '7 days'
         )
         SELECT 
-            uuid,
-            price_date,
-            finish,
-            tcg_price,
-            ck_price,
-            (ck_price - tcg_price) AS price_spread,
-            CASE 
-                WHEN tcg_price > 0 THEN ((ck_price - tcg_price) / tcg_price) * 100 
-                ELSE 0 
-            END AS spread_pct
-        FROM vendor_pivoted
-        WHERE tcg_price IS NOT NULL AND ck_price IS NOT NULL
-          AND (ck_price - tcg_price) > 0.00;
+            uuid, vendor, finish, price_date, current_price,
+            sma_7, sma_30, sma_ratio, volatility_14d,
+            daily_return_pct, velocity_7d_pct,
+            is_foil, rarity_score, edhrec_rank,
+            future_price_7d,
+            ROUND(
+                CASE 
+                    WHEN current_price > 0 AND future_price_7d IS NOT NULL 
+                    THEN ((future_price_7d - current_price) / current_price) * 100.0
+                    ELSE NULL 
+                END, 4
+            ) AS target_return_7d_pct
+        FROM temporal_targets;
     """)
-    
-    print("Advanced Quantitative Feature Engineering Complete!")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_dataset_uuid ON fact_training_dataset(uuid, vendor, finish, price_date);")
+
+    # --------------------------------------------------------------------------
+    # 3. ACTIONABLE CROSS-VENDOR ARBITRAGE
+    # --------------------------------------------------------------------------
+    print("Materializing net cross-vendor arbitrage opportunities...")
+    conn.execute("""
+        CREATE OR REPLACE TABLE fact_arbitrage_opportunities AS
+        WITH latest_date AS (
+            SELECT MAX(price_date) AS max_date FROM fact_prices WHERE format = 'paper'
+        ),
+        pivoted AS (
+            SELECT 
+                p.uuid, p.price_date, p.finish,
+                MIN(CASE WHEN p.vendor = 'tcgplayer' AND p.list_type = 'retail' THEN p.price END) AS tcg_retail,
+                -- Fixed: Strictly buylist. Removed ck_retail coalesce fake arbitrage flaw.
+                MIN(CASE WHEN p.vendor = 'cardkingdom' AND p.list_type = 'buylist' THEN p.price END) AS ck_buylist
+            FROM fact_prices p
+            JOIN latest_date l ON p.price_date = l.max_date
+            WHERE p.format = 'paper'
+            GROUP BY p.uuid, p.price_date, p.finish
+        )
+        SELECT 
+            uuid, price_date, finish,
+            tcg_retail AS tcg_price,
+            ck_buylist AS ck_price,
+            ROUND(ck_buylist - (tcg_retail * 1.10 + 1.00), 2) AS price_spread,
+            ROUND(
+                CASE 
+                    WHEN tcg_retail > 0 
+                    THEN ((ck_buylist - (tcg_retail * 1.10 + 1.00)) / (tcg_retail * 1.10 + 1.00)) * 100.0
+                    ELSE 0.0 
+                END, 2
+            ) AS spread_pct
+        FROM pivoted
+        WHERE tcg_retail IS NOT NULL 
+          AND ck_buylist IS NOT NULL
+          AND (ck_buylist - (tcg_retail * 1.10 + 1.00)) > 0.00;
+    """)
     conn.close()
+    print("Quantitative features, ML targets, and arbitrage datasets built successfully!")
+
 
 if __name__ == "__main__":
-    db_path = os.path.join("data", "mtg_prices.duckdb")
-    compute_financial_indicators(db_path)
+    DB_PATH = os.path.join("data", "mtg_prices.duckdb")
+    if not os.path.exists(DB_PATH):
+        print(f"Error: Database file not found at {DB_PATH}. Run ETL first.")
+    else:
+        compute_financial_indicators(DB_PATH)
