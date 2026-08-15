@@ -23,8 +23,24 @@ function useClock() {
   return now
 }
 
-function Stat({ label, value, tone = "default" }: { label: string; value: string; tone?: "default" | "up" | "warn" }) {
-  const toneClass = tone === "up" ? "text-up" : tone === "warn" ? "text-warn" : "text-foreground"
+function Stat({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string
+  value: string
+  tone?: "default" | "up" | "warn" | "down"
+}) {
+  const toneClass =
+    tone === "up"
+      ? "text-up"
+      : tone === "warn"
+        ? "text-warn"
+        : tone === "down"
+          ? "text-down"
+          : "text-foreground"
+
   return (
     <div className="flex items-center gap-1.5 whitespace-nowrap">
       <span className="text-dim">{label}</span>
@@ -34,36 +50,51 @@ function Stat({ label, value, tone = "default" }: { label: string; value: string
 }
 
 export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
-  const { data } = useHealth()
+  const { data, isLoading } = useHealth()
   const clock = useClock()
-  const [latency, setLatency] = useState(4)
-  const [mem, setMem] = useState(112)
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      setLatency(3 + Math.round(Math.random() * 5))
-      setMem(108 + Math.round(Math.random() * 12))
-    }, 3200)
-    return () => clearInterval(id)
-  }, [])
 
   const live = data?.status === "healthy"
   const isMock = data?.source === "mock"
 
   return (
     <header className="flex h-9 items-center gap-4 border-b border-border-strong bg-surface px-3 text-[11px] uppercase tracking-wider">
+      {/* Engine Live / Degraded Indicator */}
       <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${live ? "bg-up animate-blink" : "bg-down"}`} aria-hidden />
-        <span className={live ? "text-up" : "text-down"}>{live ? "LIVE" : "DOWN"}</span>
+        <span
+          className={`h-2 w-2 rounded-full ${
+            isLoading
+              ? "bg-dim"
+              : live
+                ? "bg-up animate-blink"
+                : "bg-down"
+          }`}
+          aria-hidden
+        />
+        <span className={isLoading ? "text-dim" : live ? "text-up" : "text-down"}>
+          {isLoading ? "SYNCING" : live ? "ONLINE" : "DEGRADED"}
+        </span>
       </div>
 
+      {/* Verified Backend Engine Status */}
       <div className="hidden items-center gap-4 md:flex">
-        <Stat label="DuckDB" value={data?.db_connected ? "CONNECTED" : "OFFLINE"} tone={data?.db_connected ? "up" : "default"} />
-        <Stat label="XGBoost" value={data?.model_loaded ? "READY · MAE $0.182" : "UNLOADED"} tone="up" />
-        <Stat label="Mem" value={`${mem}MB`} />
-        <Stat label="Latency" value={`${latency}ms`} />
+        <Stat
+          label="DuckDB"
+          value={data?.db_connected ? "CONNECTED" : "OFFLINE"}
+          tone={data?.db_connected ? "up" : "down"}
+        />
+        <Stat
+          label="XGBoost"
+          value={data?.model_loaded ? "READY" : "UNLOADED"}
+          tone={data?.model_loaded ? "up" : "warn"}
+        />
+        <Stat
+          label="Feed Mode"
+          value={isMock ? "MOCK FALLBACK" : "PERSISTENT IPC"}
+          tone={isMock ? "warn" : "default"}
+        />
       </div>
 
+      {/* Search Trigger */}
       <button
         type="button"
         onClick={onOpenSearch}
@@ -77,12 +108,14 @@ export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
         </kbd>
       </button>
 
+      {/* Simulated Feed Pill */}
       {isMock && (
         <span className="hidden rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-warn lg:inline">
           SIMULATED FEED
         </span>
       )}
 
+      {/* Real-time Clock */}
       <span className="tnum whitespace-nowrap text-muted-foreground">{clock}</span>
     </header>
   )

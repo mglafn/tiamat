@@ -8,9 +8,6 @@ import type {
   PriceHistoryPoint,
 } from "./types"
 
-// ---------------------------------------------------------------------------
-// Deterministic pseudo-random helpers for stable mock fixtures
-// ---------------------------------------------------------------------------
 function hashSeed(str: string): number {
   let h = 2166136261
   for (let i = 0; i < str.length; i++) {
@@ -36,9 +33,6 @@ function round(n: number, d = 2): number {
   return Math.round(n * f) / f
 }
 
-// ---------------------------------------------------------------------------
-// Secondary-Market Catalog Fixtures
-// ---------------------------------------------------------------------------
 interface Seed {
   name: string
   set_code: string
@@ -79,9 +73,11 @@ const SEEDS: Seed[] = [
 const VENDORS = ["tcgplayer", "cardkingdom", "starcitygames"]
 
 function makeUuid(seed: Seed, i: number): string {
-  const h = hashSeed(`${seed.name}|${seed.set_code}|${seed.finish}|${i}`).toString(16).padStart(8, "0")
-  const h2 = hashSeed(`${h}salt`).toString(16).padStart(8, "0")
-  return `${h.slice(0, 8)}-${h2.slice(0, 4)}-4${h2.slice(4, 7)}-${h2.slice(0, 4)}`
+  const h1 = hashSeed(`${seed.name}|${seed.set_code}|${seed.finish}|${i}`).toString(16).padStart(8, "0")
+  const h2 = hashSeed(`${h1}_mid`).toString(16).padStart(8, "0")
+  const h3 = hashSeed(`${h2}_end`).toString(16).padStart(8, "0")
+  const h4 = hashSeed(`${h3}_tail`).toString(16).padStart(8, "0")
+  return `${h1}-${h2.slice(0, 4)}-4${h2.slice(4, 7)}-a${h3.slice(1, 4)}-${h3.slice(4, 8)}${h4.slice(0, 8)}`
 }
 
 export interface CatalogEntry {
@@ -133,9 +129,6 @@ function predict(m: Metrics, entry: CatalogEntry): { pred: number; gainPct: numb
   return { pred, gainPct, maeDollars }
 }
 
-// ---------------------------------------------------------------------------
-// Mock Endpoint Handlers
-// ---------------------------------------------------------------------------
 export function mockHealth(): HealthCheck {
   return { status: "healthy", db_connected: true, model_loaded: true }
 }
@@ -201,8 +194,9 @@ export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpport
     const rnd = mulberry32(hashSeed(entry.uuid + "arb_feed"))
     const tcg = round(m.current * (0.95 + rnd() * 0.04))
     const ckBuylist = round(tcg * (1.18 + rnd() * 0.18))
-    const netSpread = round(ckBuylist - (tcg * 1.10 + 1.00))
-    const pct = tcg > 0 ? round((netSpread / (tcg * 1.10 + 1.00)) * 100) : 0
+    const costBasis = tcg * 1.075 + 0.10
+    const netSpread = round(ckBuylist - costBasis)
+    const pct = tcg > 0 ? round((netSpread / costBasis) * 100) : 0
     return {
       uuid: entry.uuid,
       name: entry.seed.name,

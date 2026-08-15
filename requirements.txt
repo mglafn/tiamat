@@ -1,4 +1,4 @@
-#  Core Data Processing & Streaming ETL 
+# Core Data Processing & Streaming ETL 
 ijson
 pandas
 numpy
@@ -6,12 +6,12 @@ duckdb
 python-dotenv
 requests
 
-#  Machine Learning & Time-Series Forecasting 
+# Machine Learning & Time-Series Forecasting 
 scikit-learn
 xgboost
 statsmodels
 
-#  API Layer & Microservice 
+# API Layer & Microservice 
 fastapi
 uvicorn
 pydantic
@@ -19,5 +19,3 @@ pydantic
 # Developer Utilities & Testing 
 pytest
 black
-
-apache-airflow

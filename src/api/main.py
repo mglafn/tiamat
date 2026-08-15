@@ -5,32 +5,26 @@ import pandas as pd
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-# ------------------------------------------------------------------------------
-# Robust Path Resolution
-# ------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-# ------------------------------------------------------------------------------
-# Global State Management
-# ------------------------------------------------------------------------------
+ALLOWED_FEATURE_COLS = {
+    'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
+    'is_foil', 'rarity_score', 'edhrec_rank'
+}
+
 model_artifact = None
-db_conn = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Maintains persistent connections to ML models and analytical databases.
-    """
-    global model_artifact, db_conn
-    
+    global model_artifact
     if MODEL_PATH.exists():
         try:
             model_artifact = joblib.load(MODEL_PATH)
@@ -39,30 +33,23 @@ async def lifespan(app: FastAPI):
             print(f"[Startup Error] Model artifact load failed: {e}")
     else:
         print(f"[Startup Warning] Model artifact not found at {MODEL_PATH}")
-
-    if DB_PATH.exists():
-        try:
-            db_conn = duckdb.connect(str(DB_PATH), read_only=True)
-            print("[Startup] Persistent Read-Only connection to DuckDB established.")
-        except Exception as e:
-            print(f"[Startup Error] Database connection failed: {e}")
-    else:
-        print(f"[Startup Warning] DuckDB database not found at {DB_PATH}")
-
     yield
 
-    if db_conn:
-        db_conn.close()
-        print("[Shutdown] DuckDB connection closed.")
+
+def get_db():
+    if not DB_PATH.exists():
+        raise HTTPException(status_code=503, detail="Database file missing. Run ETL pipeline first.")
+    conn = duckdb.connect(str(DB_PATH), read_only=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
-# ------------------------------------------------------------------------------
-# Application Initialization
-# ------------------------------------------------------------------------------
 app = FastAPI(
     title="Financial Arbitrage & Asset Forecasting API",
     description="Enterprise microservice serving cross-vendor arbitrage spreads, historical price series, and XGBoost price forecasts.",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -74,9 +61,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------------------------
-# Schemas (Pydantic)
-# ------------------------------------------------------------------------------
+
 class HealthCheck(BaseModel):
     status: str
     db_connected: bool
@@ -158,9 +143,6 @@ class CardSearchResult(BaseModel):
     vendor_count: int
 
 
-# ------------------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/docs")
@@ -168,19 +150,27 @@ def root():
 
 @app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
+    db_alive = False
+    if DB_PATH.exists():
+        try:
+            test_conn = duckdb.connect(str(DB_PATH), read_only=True)
+            test_conn.execute("SELECT 1").fetchone()
+            test_conn.close()
+            db_alive = True
+        except Exception:
+            db_alive = False
+
     return HealthCheck(
-        status="healthy" if (db_conn is not None and model_artifact is not None) else "degraded",
-        db_connected=db_conn is not None,
+        status="healthy" if (db_alive and model_artifact is not None) else "degraded",
+        db_connected=db_alive,
         model_loaded=model_artifact is not None
     )
 
 
 @app.get("/api/v1/catalog", response_model=List[CatalogCard], tags=["Catalog"])
-def get_catalog():
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
+def get_catalog(db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
     try:
-        query = "SELECT uuid, name, set_code, collector_number FROM dim_cards"
+        query = "SELECT uuid, name, set_code, collector_number FROM dim_cards WHERE is_online_only = false"
         rows = db_conn.cursor().execute(query).fetchall()
         return [
             CatalogCard(
@@ -195,20 +185,16 @@ def get_catalog():
 
 
 @app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
-def get_card_printings(card_uuid: str):
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
-    
+def get_card_printings(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
     query = """
         WITH target_card AS (
             SELECT name FROM dim_cards WHERE uuid = ?
         ),
         latest_prices AS (
-            SELECT uuid, MIN(price) AS floor_price
+            SELECT uuid, price AS floor_price
             FROM fact_prices
-            WHERE price_date = (SELECT MAX(price_date) FROM fact_prices)
-              AND format = 'paper'
-            GROUP BY uuid
+            WHERE format = 'paper' AND list_type = 'retail'
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY price_date DESC, price ASC) = 1
         )
         SELECT 
             d.uuid, 
@@ -219,6 +205,7 @@ def get_card_printings(card_uuid: str):
         FROM dim_cards d
         LEFT JOIN latest_prices p ON d.uuid = p.uuid
         WHERE d.name = (SELECT name FROM target_card)
+          AND d.is_online_only = false
         ORDER BY d.set_code ASC, d.collector_number ASC
         LIMIT 40
     """
@@ -242,14 +229,9 @@ def get_card_history(
     card_uuid: str,
     vendor: str = Query("tcgplayer", description="Vendor name (e.g. tcgplayer, cardkingdom)"),
     finish: str = Query("normal", description="Finish type: 'normal' or 'foil'"),
-    days: int = Query(60, ge=7, le=365, description="Number of historical trading days")
+    days: int = Query(60, ge=7, le=365, description="Number of historical trading days"),
+    db_conn: duckdb.DuckDBPyConnection = Depends(get_db)
 ):
-    """
-    Returns verified historical daily prices, SMA-7, SMA-30, and daily returns.
-    """
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
-    
     normalized_finish = "normal" if finish.lower() in ["nonfoil", "regular"] else finish.lower()
 
     query = """
@@ -269,7 +251,6 @@ def get_card_history(
     try:
         rows = db_conn.cursor().execute(query, [card_uuid, vendor.lower(), normalized_finish, days]).fetchall()
         if not rows:
-            # Fallback securely to the most prominent single vendor if requested vendor is missing
             fallback_query = """
                 SELECT 
                     CAST(price_date AS VARCHAR) AS price_date,
@@ -280,21 +261,11 @@ def get_card_history(
                 FROM fact_card_features
                 WHERE uuid = ? 
                   AND finish = ?
-                  AND vendor = (
-                      SELECT vendor 
-                      FROM fact_card_features 
-                      WHERE uuid = ? AND finish = ? 
-                      ORDER BY price_date DESC LIMIT 1
-                  )
                 ORDER BY price_date DESC
                 LIMIT ?
             """
-            rows = db_conn.cursor().execute(
-                fallback_query, 
-                [card_uuid, normalized_finish, card_uuid, normalized_finish, days]
-            ).fetchall()
+            rows = db_conn.cursor().execute(fallback_query, [card_uuid, normalized_finish, days]).fetchall()
 
-        # Return chronologically ascending (oldest to newest) for charting
         rows.reverse()
         return [
             PriceHistoryPoint(
@@ -312,12 +283,16 @@ def get_card_history(
 @app.get("/api/v1/search", response_model=List[CardSearchResult], tags=["Search"])
 def search_card_by_name(
     name: str = Query(..., min_length=2, description="Partial or full card name to resolve"),
-    limit: int = Query(20, le=100)
+    limit: int = Query(20, le=100),
+    db_conn: duckdb.DuckDBPyConnection = Depends(get_db)
 ):
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
-    
     query = """
+        WITH latest_features AS (
+            SELECT 
+                uuid, vendor, finish, current_price
+            FROM fact_card_features
+            QUALIFY ROW_NUMBER() OVER(PARTITION BY uuid, vendor, finish ORDER BY price_date DESC) = 1
+        )
         SELECT 
             d.uuid, 
             d.name, 
@@ -328,9 +303,9 @@ def search_card_by_name(
             AVG(f.current_price) AS avg_price,
             COUNT(DISTINCT f.vendor) AS vendor_count
         FROM dim_cards d
-        JOIN fact_card_features f ON d.uuid = f.uuid
+        JOIN latest_features f ON d.uuid = f.uuid
         WHERE d.name ILIKE ?
-          AND f.price_date = (SELECT MAX(price_date) FROM fact_card_features)
+          AND d.is_online_only = false
         GROUP BY d.uuid, d.name, d.set_code, d.collector_number, f.finish
         ORDER BY floor_price DESC
         LIMIT ?
@@ -357,12 +332,19 @@ def search_card_by_name(
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(0.00, description="Minimum dollar spread threshold"),
-    limit: int = Query(100, le=500)
+    finish: Optional[str] = Query(None, description="Optional finish filter ('normal' or 'foil')"),
+    limit: int = Query(100, le=500),
+    db_conn: duckdb.DuckDBPyConnection = Depends(get_db)
 ):
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
+    params = [float(min_spread)]
+    finish_clause = ""
+    if finish and finish.lower() in ["normal", "foil"]:
+        finish_clause = "AND f.finish = ?"
+        params.append(finish.lower())
     
-    query = """
+    params.append(int(limit))
+
+    query = f"""
         SELECT 
             f.uuid, 
             COALESCE(d.name, f.uuid) AS name,
@@ -377,11 +359,12 @@ def get_arbitrage(
         FROM fact_arbitrage_opportunities f
         LEFT JOIN dim_cards d ON f.uuid = d.uuid
         WHERE f.price_spread >= ?
+          {finish_clause}
         ORDER BY f.price_spread DESC
         LIMIT ?
     """
     try:
-        rows = db_conn.cursor().execute(query, [float(min_spread), int(limit)]).fetchall()
+        rows = db_conn.cursor().execute(query, params).fetchall()
         return [
             ArbitrageOpportunity(
                 uuid=r[0], 
@@ -403,59 +386,69 @@ def get_arbitrage(
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
     card_uuid: str,
-    vendor: str = Query("tcgplayer", description="Vendor name (e.g., tcgplayer, cardkingdom)"),
-    finish: str = Query("normal", description="Finish type: 'normal' or 'foil'")
+    vendor: str = Query("tcgplayer", description="Vendor name"),
+    finish: str = Query("normal", description="Finish type: 'normal' or 'foil'"),
+    db_conn: duckdb.DuckDBPyConnection = Depends(get_db)
 ):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model artifact not loaded.")
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
 
     normalized_finish = "normal" if finish.lower() in ["nonfoil", "regular"] else finish.lower()
-    feature_cols = model_artifact.get("feature_cols", [
-        'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
-        'is_foil', 'rarity_score', 'edhrec_rank'
-    ])
+    raw_cols = model_artifact.get("feature_cols", list(ALLOWED_FEATURE_COLS))
+    feature_cols = [c for c in raw_cols if c in ALLOWED_FEATURE_COLS]
     cols_sql = ", ".join(feature_cols)
 
     query = f"""
-        SELECT current_price, {cols_sql}
+        SELECT current_price, vendor, {cols_sql}
         FROM fact_card_features
         WHERE uuid = ? AND vendor = ? AND finish = ?
         ORDER BY price_date DESC LIMIT 1
     """
     try:
         row = db_conn.cursor().execute(query, [card_uuid, vendor.lower(), normalized_finish]).fetchone()
+        if not row:
+            fallback_query = f"""
+                SELECT current_price, vendor, {cols_sql}
+                FROM fact_card_features
+                WHERE uuid = ? AND finish = ?
+                ORDER BY price_date DESC LIMIT 1
+            """
+            row = db_conn.cursor().execute(fallback_query, [card_uuid, normalized_finish]).fetchone()
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading feature store: {str(e)}")
 
     if not row:
         raise HTTPException(
             status_code=404, 
-            detail=f"Card pricing metrics not found for vendor '{vendor}' and finish '{finish}'."
+            detail=f"Card pricing metrics not found for finish '{finish}'."
         )
 
     current_price = float(row[0])
-    feature_vals = row[1:]
+    active_vendor = row[1]
+    feature_vals = row[2:]
 
-    input_df = pd.DataFrame([dict(zip(feature_cols, feature_vals))]).fillna(0.0)
+    input_df = pd.DataFrame([dict(zip(feature_cols, feature_vals))])
+    if 'sma_ratio' in input_df.columns:
+        input_df['sma_ratio'] = input_df['sma_ratio'].fillna(1.0)
 
     model = model_artifact["model"]
     metrics = model_artifact.get("metrics", {})
-    mae_pct = metrics.get("mae_pct", 5.0)
+    mae_pct = metrics.get("mae_pct", 3.8)
+    deadband = metrics.get("deadband_threshold_pct", 0.50)
     directional_acc = metrics.get("directional_accuracy_pct", None)
 
-    # Predict relative 7-day return %
-    predicted_gain_pct = float(model.predict(input_df)[0])
+    raw_gain_pct = float(model.predict(input_df)[0])
+    # Apply conviction deadband
+    predicted_gain_pct = 0.0 if abs(raw_gain_pct) < deadband else raw_gain_pct
+
     predicted_7d_price = current_price * (1.0 + (predicted_gain_pct / 100.0))
     predicted_7d_price = max(0.01, round(predicted_7d_price, 2))
-
-    # Convert percentage MAE to dollar uncertainty at this asset's price point
     model_mae_dollars = round(current_price * (mae_pct / 100.0), 4)
 
     return PredictionResponse(
         uuid=card_uuid, 
-        vendor=vendor, 
+        vendor=active_vendor, 
         finish=normalized_finish,
         current_price=round(current_price, 2),
         predicted_7d_price=predicted_7d_price,
@@ -466,9 +459,7 @@ def get_forecast(
 
 
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
-def get_card_summary(card_uuid: str):
-    if not db_conn:
-        raise HTTPException(status_code=503, detail="Database connection unavailable.")
+def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
 
@@ -488,39 +479,70 @@ def get_card_summary(card_uuid: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch card metadata: {str(e)}")
 
-    date_query = "SELECT MAX(price_date) FROM fact_card_features WHERE uuid = ?"
-    latest_date_row = db_conn.cursor().execute(date_query, [card_uuid]).fetchone()
-    if not latest_date_row or not latest_date_row[0]:
-        raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
-    
-    latest_date = latest_date_row[0]
+    # 1. Accurately resolve actual printing variant count across the card catalog
+    variant_count = 1
+    try:
+        var_query = """
+            SELECT COUNT(DISTINCT d2.uuid) 
+            FROM dim_cards d1
+            JOIN dim_cards d2 ON d1.name = d2.name
+            WHERE d1.uuid = ? AND d2.is_online_only = false
+        """
+        var_res = db_conn.cursor().execute(var_query, [card_uuid]).fetchone()
+        if var_res and var_res[0]:
+            variant_count = int(var_res[0])
+    except Exception:
+        variant_count = 1
 
+    # 2. Select dominant finish
+    finish_query = """
+        SELECT finish FROM fact_card_features 
+        WHERE uuid = ? 
+        ORDER BY price_date DESC, CASE WHEN finish = 'normal' THEN 1 ELSE 2 END ASC 
+        LIMIT 1
+    """
+    target_finish_row = db_conn.cursor().execute(finish_query, [card_uuid]).fetchone()
+    if not target_finish_row:
+        raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
+    primary_target_finish = target_finish_row[0]
+
+    # 3. Aggregate latest price per vendor (avoids dropping vendors synced 1-2 days earlier)
     agg_query = """
+        WITH latest_vendor_prices AS (
+            SELECT vendor, current_price, price_date
+            FROM fact_card_features
+            WHERE uuid = ? AND finish = ?
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY vendor ORDER BY price_date DESC) = 1
+        )
         SELECT 
-            COUNT(*) AS variant_count,
             MIN(current_price) AS floor_price,
             AVG(current_price) AS avg_price,
-            MAX(current_price) AS ceiling_price
-        FROM fact_card_features
-        WHERE uuid = ? AND price_date = ?
+            MAX(current_price) AS ceiling_price,
+            MAX(price_date) AS latest_date
+        FROM latest_vendor_prices
     """
-    agg_row = db_conn.cursor().execute(agg_query, [card_uuid, latest_date]).fetchone()
-    variant_count, floor_price, avg_price, ceiling_price = agg_row
+    agg_row = db_conn.cursor().execute(agg_query, [card_uuid, primary_target_finish]).fetchone()
+    if not agg_row or agg_row[0] is None:
+        raise HTTPException(status_code=404, detail=f"Pricing not found for card UUID: {card_uuid}")
+    floor_price, avg_price, ceiling_price, latest_date = agg_row
 
-    feature_cols = model_artifact.get("feature_cols", [
-        'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
-        'is_foil', 'rarity_score', 'edhrec_rank'
-    ])
+    raw_cols = model_artifact.get("feature_cols", list(ALLOWED_FEATURE_COLS))
+    feature_cols = [c for c in raw_cols if c in ALLOWED_FEATURE_COLS]
     cols_sql = ", ".join(feature_cols)
 
     variant_query = f"""
+        WITH latest_vendor_features AS (
+            SELECT vendor, finish, current_price, {cols_sql}
+            FROM fact_card_features
+            WHERE uuid = ? AND finish = ?
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY vendor ORDER BY price_date DESC) = 1
+        )
         SELECT vendor, finish, current_price, {cols_sql}
-        FROM fact_card_features
-        WHERE uuid = ? AND price_date = ?
-        ORDER BY current_price DESC
+        FROM latest_vendor_features
+        ORDER BY ABS(current_price - ?) ASC
         LIMIT 1
     """
-    v_row = db_conn.cursor().execute(variant_query, [card_uuid, latest_date]).fetchone()
+    v_row = db_conn.cursor().execute(variant_query, [card_uuid, primary_target_finish, avg_price]).fetchone()
     if not v_row:
         raise HTTPException(status_code=404, detail=f"Variant pricing not found for card UUID: {card_uuid}")
 
@@ -528,10 +550,14 @@ def get_card_summary(card_uuid: str):
     current_price = float(v_row[2])
     feature_vals = v_row[3:]
 
-    input_df = pd.DataFrame([dict(zip(feature_cols, feature_vals))]).fillna(0.0)
+    input_df = pd.DataFrame([dict(zip(feature_cols, feature_vals))])
+    if 'sma_ratio' in input_df.columns:
+        input_df['sma_ratio'] = input_df['sma_ratio'].fillna(1.0)
+    
     model = model_artifact["model"]
-
-    pred_return_pct = float(model.predict(input_df)[0])
+    deadband = model_artifact.get("metrics", {}).get("deadband_threshold_pct", 0.50)
+    raw_return_pct = float(model.predict(input_df)[0])
+    pred_return_pct = 0.0 if abs(raw_return_pct) < deadband else raw_return_pct
     pred_price = max(0.01, round(current_price * (1.0 + (pred_return_pct / 100.0)), 2))
 
     return CardMarketSummary(
@@ -541,7 +567,7 @@ def get_card_summary(card_uuid: str):
         collector_number=collector_number,
         edhrec_rank=edhrec_rank,
         latest_price_date=str(latest_date),
-        total_market_variants=int(variant_count),
+        total_market_variants=variant_count,
         floor_price=round(float(floor_price), 2),
         avg_price=round(float(avg_price), 2),
         ceiling_price=round(float(ceiling_price), 2),

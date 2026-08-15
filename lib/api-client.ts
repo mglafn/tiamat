@@ -19,7 +19,6 @@ import type {
   PriceHistoryPoint,
 } from "./types"
 
-// Generic fetcher that catches network failures and returns fallback mock data when the backend is offline
 async function fetchWithFallback<T>(url: string, fallbackFactory: () => T): Promise<T> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) })
@@ -37,11 +36,13 @@ export const apiClient = {
       () => ({ ...mockHealth(), source: "mock" })
     ),
 
-  getArbitrage: (minSpread: number, limit = 100) =>
-    fetchWithFallback<ArbitrageOpportunity[]>(
-      `/api/v1/arbitrage?min_spread=${minSpread}&limit=${limit}`,
+  getArbitrage: (minSpread: number, finish = "all", limit = 100) => {
+    const finishParam = finish !== "all" ? `&finish=${encodeURIComponent(finish)}` : ""
+    return fetchWithFallback<ArbitrageOpportunity[]>(
+      `/api/v1/arbitrage?min_spread=${minSpread}${finishParam}&limit=${limit}`,
       () => mockArbitrage(minSpread, limit)
-    ),
+    )
+  },
 
   getHistory: (uuid: string, vendor = "tcgplayer", finish = "normal", days = 60) =>
     fetchWithFallback<PriceHistoryPoint[]>(

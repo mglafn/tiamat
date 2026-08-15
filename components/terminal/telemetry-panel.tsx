@@ -52,6 +52,50 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         }
       : null
 
+  // ---------------------------------------------------------------------------
+  // Quantitative Signal Validation & Confidence Safeguard
+  // ---------------------------------------------------------------------------
+  const gainPct = forecast?.predicted_gain_pct ?? 0
+  const dirAcc = forecast?.directional_accuracy_pct ?? 50.0
+
+  // Statistically sound signal thresholds based on momentum + model directional edge
+  const isModerateConfidence = Math.abs(gainPct) >= 2.5 && dirAcc > 50.0
+  const isHighConfidence = Math.abs(gainPct) >= 5.0 && dirAcc > 52.0
+
+  let signalLabel = "NEUTRAL / INSUFFICIENT DATA"
+  let signalTone = "text-muted-foreground font-semibold"
+  let signalDescription =
+    "Model confidence is baseline. Hold current position or gather more market depth."
+
+  if (forecast) {
+    if (gainPct >= 5.0 && isHighConfidence) {
+      signalLabel = "STRONG ACCUMULATE"
+      signalTone = "text-up font-semibold"
+      signalDescription =
+        "High directional confidence with >5% 7-day projected price drift across primary liquidity pools."
+    } else if (gainPct >= 2.5 && isModerateConfidence) {
+      signalLabel = "ACCUMULATE"
+      signalTone = "text-up font-semibold"
+      signalDescription =
+        "Moderate upward momentum detected based on SMA cross ratios and quantitative indicators."
+    } else if (gainPct <= -5.0 && isHighConfidence) {
+      signalLabel = "STRONG REDUCE"
+      signalTone = "text-down font-semibold"
+      signalDescription =
+        "High probability of downward mean reversion or buybox degradation over the 7-day horizon."
+    } else if (gainPct <= -2.5 && isModerateConfidence) {
+      signalLabel = "REDUCE EXPOSURE"
+      signalTone = "text-down font-semibold"
+      signalDescription =
+        "Negative momentum trajectory detected. Consider realizing spreads via buylists."
+    } else {
+      signalLabel = "NEUTRAL HOLD"
+      signalTone = "text-dim font-semibold"
+      signalDescription =
+        "Projected price movement is flat or model directional edge is not statistically significant."
+    }
+  }
+
   return (
     <section className="flex min-h-0 flex-col border-l border-border-strong bg-panel" aria-label="Execution telemetry">
       <div className="border-b border-border-strong bg-surface px-3 py-1.5">
@@ -196,7 +240,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   <Row 
                     label="Directional Accuracy" 
                     value={`${forecast.directional_accuracy_pct}%`} 
-                    tone="text-accent" 
+                    tone={isHighConfidence ? "text-up font-medium" : "text-dim"} 
                   />
                 )}
               </div>
@@ -207,18 +251,10 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               <div className="mt-3 rounded-sm border border-border bg-surface/50 p-2.5">
                 <div className="flex items-center justify-between text-[10px] uppercase">
                   <span className="text-dim">Execution Signal</span>
-                  <span className={forecast.predicted_gain_pct >= 0 ? "text-up font-semibold" : "text-down font-semibold"}>
-                    {forecast.predicted_gain_pct >= 6.0
-                      ? "STRONG ACCUMULATE"
-                      : forecast.predicted_gain_pct >= 1.5
-                        ? "ACCUMULATE"
-                        : forecast.predicted_gain_pct > -2.0
-                          ? "NEUTRAL HOLD"
-                          : "REDUCE EXPOSURE"}
-                  </span>
+                  <span className={signalTone}>{signalLabel}</span>
                 </div>
                 <p className="mt-1 text-[10px] leading-relaxed text-dim">
-                  7-day forward return momentum derived from stationary SMA cross ratios and 14-day rolling volatility.
+                  {signalDescription}
                 </p>
               </div>
             )}

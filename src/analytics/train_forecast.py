@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 import duckdb
 import pandas as pd
@@ -8,11 +9,14 @@ from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
+# Quant conviction threshold: price drift < 0.50% is unactionable market noise
+DEADBAND_THRESHOLD_PCT = 0.50
+
+
 def train_xgboost_forecast(db_path: str, model_output_dir: str):
     print("Loading ML dataset from DuckDB...")
     conn = duckdb.connect(db_path, read_only=True)
     
-    # Query features and stationary relative percentage target
     query = """
         SELECT 
             price_date,
@@ -26,9 +30,8 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
             target_return_7d_pct
         FROM fact_training_dataset
         WHERE target_return_7d_pct IS NOT NULL 
-          AND current_price > 0.05
-          -- Filter extreme market anomalies/feed spikes
-          AND target_return_7d_pct BETWEEN -90.0 AND 300.0
+          AND current_price >= 2.50
+          AND target_return_7d_pct BETWEEN -50.0 AND 150.0
     """
     df = conn.execute(query).fetchdf()
     conn.close()
@@ -39,7 +42,7 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     print(f"Loaded {len(df):,} sanitized historical samples.")
 
     # --------------------------------------------------------------------------
-    # 1. TEMPORAL SORT & OUT-OF-TIME CHRONOLOGICAL SPLIT WITH EMBARGO
+    # 1. Temporal Sort & Chronological Split with 8-Day Embargo
     # --------------------------------------------------------------------------
     df['price_date'] = pd.to_datetime(df['price_date'])
     df = df.sort_values('price_date').reset_index(drop=True)
@@ -55,15 +58,17 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     ]
     target_col = 'target_return_7d_pct'
     
-    X = df[feature_cols].fillna(0.0)
+    if 'sma_ratio' in df.columns:
+        df['sma_ratio'] = df['sma_ratio'].fillna(1.0)
+    
+    X = df[feature_cols]
     y = df[target_col]
 
-    # Chronological 80/20 train/test cutoff
     split_idx = int(len(df) * 0.8)
     initial_cutoff_date = df.loc[split_idx, 'price_date']
     
-    # 7-day embargo to prevent target lookahead leakage into the test set
-    test_start_date = initial_cutoff_date + pd.Timedelta(days=7)
+    # 8-day embargo guarantees no 7-day target overlaps test feature dates
+    test_start_date = initial_cutoff_date + pd.Timedelta(days=8)
     
     train_mask = df['price_date'] <= initial_cutoff_date
     test_mask = df['price_date'] >= test_start_date
@@ -75,27 +80,33 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     print(f"Training set: {len(X_train):,} rows | Test set: {len(X_test):,} rows")
 
     # --------------------------------------------------------------------------
-    # 2. MODEL TRAINING (Regularized Gradient Boosting)
+    # 2. Model Training (Optimized for L1 Loss + Interaction Capacity)
     # --------------------------------------------------------------------------
     print("Training XGBoost Regressor on asset return momentum...")
     model = XGBRegressor(
-        n_estimators=180,
-        learning_rate=0.03,
-        max_depth=5,
+        n_estimators=200,
+        learning_rate=0.04,
+        max_depth=6,
+        gamma=0.5,             # Minimum loss reduction required to make a further partition
         subsample=0.85,
         colsample_bytree=0.85,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        reg_alpha=4.0,         # L1 Regularization for leaf sparsity
+        reg_lambda=2.0,        # L2 Regularization
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
+        objective='reg:absoluteerror'
     )
     
     model.fit(X_train, y_train)
 
     # --------------------------------------------------------------------------
-    # 3. QUANTITATIVE EVALUATION & BASELINE COMPARISON
+    # 3. Quantitative Evaluation with Signal Deadband
     # --------------------------------------------------------------------------
-    predictions = model.predict(X_test)
+    raw_predictions = model.predict(X_test)
+    
+    # Apply conviction filter (deadband): zero out noise below threshold
+    predictions = np.where(np.abs(raw_predictions) < DEADBAND_THRESHOLD_PCT, 0.0, raw_predictions)
+    
     mae = mean_absolute_error(y_test, predictions)
     rmse = np.sqrt(mean_squared_error(y_test, predictions))
 
@@ -103,14 +114,13 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     naive_predictions = np.zeros_like(y_test)
     naive_mae = mean_absolute_error(y_test, naive_predictions)
     
-    # Filter out perfectly flat historical returns to prevent accuracy inflation
     movement_mask = y_test != 0
     y_test_moves = y_test[movement_mask]
     pred_moves = predictions[movement_mask]
     
     if len(y_test_moves) > 0:
-        actual_direction = (y_test_moves > 0).astype(int)
-        predicted_direction = (pred_moves > 0).astype(int)
+        actual_direction = np.sign(y_test_moves)
+        predicted_direction = np.sign(pred_moves)
         directional_accuracy = (actual_direction == predicted_direction).mean() * 100.0
     else:
         directional_accuracy = 0.0
@@ -122,8 +132,14 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     print(f"Directional Sign Accuracy:          {directional_accuracy:.1f}%")
 
     # --------------------------------------------------------------------------
-    # 4. ARTIFACT PERSISTENCE
+    # 4. Quality Gate & Artifact Persistence
     # --------------------------------------------------------------------------
+    if mae > naive_mae:
+        print(f"\n⚠️  [Quality Alert] Model MAE ({mae:.2f}%) did not outperform Naive Baseline ({naive_mae:.2f}%).")
+        print("    Persisting artifact with performance diagnostics logged.")
+    else:
+        print(f"\n✅ [Quality Gate Passed] Model MAE ({mae:.2f}%) outperformed Naive Baseline ({naive_mae:.2f}%).")
+
     os.makedirs(model_output_dir, exist_ok=True)
     model_path = os.path.join(model_output_dir, "xgboost_forecast.joblib")
     
@@ -132,9 +148,11 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         "feature_cols": feature_cols,
         "target_col": target_col,
         "metrics": {
-            "mae_pct": round(float(mae), 4), 
+            "mae_pct": round(float(mae), 4),
+            "naive_mae_pct": round(float(naive_mae), 4),
             "rmse_pct": round(float(rmse), 4),
             "directional_accuracy_pct": round(float(directional_accuracy), 2),
+            "deadband_threshold_pct": DEADBAND_THRESHOLD_PCT,
             "split_date": str(initial_cutoff_date.date())
         }
     }

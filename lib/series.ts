@@ -16,15 +16,21 @@ const FWD_DAYS = 7
 
 function formatDate(dateStr: string): string {
   try {
-    const d = new Date(dateStr)
+    const d = new Date(dateStr.includes("T") ? dateStr : `${dateStr}T12:00:00`)
     return d.toLocaleDateString("en-US", { month: "short", day: "2-digit" })
   } catch {
     return dateStr
   }
 }
 
+function parseToMidnightMs(dateStr: string): number {
+  const d = new Date(dateStr.includes("T") ? dateStr : `${dateStr}T12:00:00`)
+  return d.getTime()
+}
+
 /**
  * Combines verified DuckDB historical pricing with XGBoost forward projections.
+ * Accurately aligns dates to avoid non-linear axis warping on missing trading days.
  */
 export function buildTimeSeries(
   history: PriceHistoryPoint[],
@@ -36,12 +42,16 @@ export function buildTimeSeries(
 
   const n = history.length
   const lastHistoricalPoint = history[n - 1]
+  const anchorTime = parseToMidnightMs(lastHistoricalPoint.price_date)
   const currentPrice = forecast?.current_price ?? lastHistoricalPoint.price
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000
 
-  // 1. Map verified historical observations
-  const points: DriftPoint[] = history.map((pt, i) => {
-    const day = i - (n - 1)
+  // 1. Map verified historical observations with true day-offset calculation
+  const points: DriftPoint[] = history.map((pt) => {
+    const pointTime = parseToMidnightMs(pt.price_date)
+    const day = Math.round((pointTime - anchorTime) / ONE_DAY_MS)
     const isAnchor = day === 0
+
     return {
       day,
       date: formatDate(pt.price_date),
@@ -59,18 +69,18 @@ export function buildTimeSeries(
     const target = forecast.predicted_7d_price
     const mae = Math.max(0.01, forecast.model_mae)
     
-    // Parse anchor date to compute forward calendar dates
-    const anchorDate = new Date(lastHistoricalPoint.price_date)
+    const anchorDate = new Date(
+      lastHistoricalPoint.price_date.includes("T") 
+        ? lastHistoricalPoint.price_date 
+        : `${lastHistoricalPoint.price_date}T12:00:00`
+    )
 
     for (let k = 1; k <= FWD_DAYS; k++) {
       const fwdDate = new Date(anchorDate)
       fwdDate.setDate(fwdDate.getDate() + k)
 
       const t = k / FWD_DAYS
-      // Standard linear drift progression from current close -> 7D target
       const interpolatedPrice = currentPrice + (target - currentPrice) * t
-      
-      // Normalized sqrt(t) diffusion: at k = 7 (FWD_DAYS), uncertaintyBand equals model MAE
       const uncertaintyBand = mae * Math.sqrt(k / FWD_DAYS)
 
       points.push({

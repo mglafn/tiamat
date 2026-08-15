@@ -4,9 +4,6 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-# ------------------------------------------------------------------------------
-# Robust Path & Import Resolution
-# ------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "src" / "etl"))
@@ -35,7 +32,6 @@ def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
                 if not isinstance(vendor_data, dict):
                     continue
 
-                # MTGJSON stores both retail and buylist pricing structures
                 for list_type in ['retail', 'buylist']:
                     if list_type not in vendor_data:
                         continue
@@ -75,7 +71,6 @@ def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
 def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     """
     Infers schema and ingests dim_cards catalog from cards.csv directly into DuckDB.
-    Uses forward slashes (.as_posix()) to prevent Windows backslash escape errors.
     """
     posix_path = cards_csv_path.as_posix()
     print(f"Ingesting dimension catalog from {posix_path}...")
@@ -88,7 +83,8 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
             COALESCE(setCode, 'OTC') as set_code, 
             number as collector_number, 
             rarity,
-            TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank
+            TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank,
+            COALESCE(TRY_CAST(isOnlineOnly AS BOOLEAN), false) as is_online_only
         FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
@@ -115,55 +111,57 @@ def main():
     print(f"Connecting to DuckDB at: {db_path}")
     conn = duckdb.connect(str(db_path))
 
-    # 1. Initialize Fact Table with list_type support
-    conn.execute("DROP TABLE IF EXISTS fact_prices")
-    conn.execute("""
-        CREATE TABLE fact_prices (
-            uuid VARCHAR,
-            format VARCHAR,
-            vendor VARCHAR,
-            list_type VARCHAR,
-            finish VARCHAR,
-            price_date DATE,
-            price DOUBLE
-        )
-    """)
-    
-    print("Beginning DuckDB fact table ingestion...")
-    total_rows = 0
-    for df_batch in parse_and_batch_records(raw_json_path):
-        conn.register("df_batch_view", df_batch)
+    try:
+        # 1. Initialize Fact Table with list_type and format support
+        conn.execute("DROP TABLE IF EXISTS fact_prices")
         conn.execute("""
-            INSERT INTO fact_prices 
-            SELECT 
-                uuid, 
-                format, 
-                vendor, 
-                list_type,
-                finish, 
-                CAST(price_date AS DATE), 
-                price 
-            FROM df_batch_view
+            CREATE TABLE fact_prices (
+                uuid VARCHAR,
+                format VARCHAR,
+                vendor VARCHAR,
+                list_type VARCHAR,
+                finish VARCHAR,
+                price_date DATE,
+                price DOUBLE
+            )
         """)
-        conn.unregister("df_batch_view")
-        total_rows += len(df_batch)
-        print(f"  -> Ingested batch... Total records loaded: {total_rows:,}")
+        
+        print("Beginning DuckDB fact table ingestion...")
+        total_rows = 0
+        for df_batch in parse_and_batch_records(raw_json_path):
+            conn.register("df_batch_view", df_batch)
+            conn.execute("""
+                INSERT INTO fact_prices 
+                SELECT 
+                    uuid, 
+                    format, 
+                    vendor, 
+                    list_type, 
+                    finish, 
+                    CAST(price_date AS DATE), 
+                    price 
+                FROM df_batch_view
+            """)
+            conn.unregister("df_batch_view")
+            total_rows += len(df_batch)
+            print(f"  -> Ingested batch... Total records loaded: {total_rows:,}")
 
-    print(f"Fact table complete! Total records loaded: {total_rows:,}\n")
+        print(f"Fact table complete! Total records loaded: {total_rows:,}\n")
 
-    # 2. Add high-performance indexes
-    print("Building analytical indexes on fact_prices...")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, vendor, finish, list_type);")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
+        # 2. Add high-performance indexes
+        print("Building analytical indexes on fact_prices...")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, vendor, finish, list_type, format);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
 
-    # 3. Ingest Dimension Table
-    if cards_csv_path.exists():
-        load_dimension_cards(conn, cards_csv_path)
-    else:
-        print(f"Warning: {cards_csv_path} not found. Skipping dim_cards creation.")
+        # 3. Ingest Dimension Table
+        if cards_csv_path.exists():
+            load_dimension_cards(conn, cards_csv_path)
+        else:
+            print(f"Warning: {cards_csv_path} not found. Skipping dim_cards creation.")
 
-    conn.close()
-    print("DuckDB ingestion finished successfully.")
+    finally:
+        conn.close()
+        print("DuckDB connection closed successfully.")
 
 
 if __name__ == "__main__":
