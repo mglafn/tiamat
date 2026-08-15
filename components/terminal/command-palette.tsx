@@ -1,4 +1,5 @@
 "use client"
+
 import { useEffect, useRef, useState } from "react"
 import { CornerDownLeft, Loader2, Search } from "lucide-react"
 import { useSearch } from "@/lib/hooks"
@@ -16,17 +17,31 @@ export function CommandPalette({
   onSelect,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("")
+  const [debouncedQuery, setDebouncedQuery] = useState("")
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const { data: results = [], isLoading } = useSearch(query)
 
+  // Reset states when the modal is opened
   useEffect(() => {
     if (open) {
       setQuery("")
+      setDebouncedQuery("")
       setActive(0)
       requestAnimationFrame(() => inputRef.current?.focus())
     }
   }, [open])
+
+  // Debounce keystrokes by 250ms to prevent spamming backend /api/v1/search
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedQuery(query)
+    }, 250)
+    return () => clearTimeout(handler)
+  }, [query])
+
+  const { data: results = [], isLoading } = useSearch(debouncedQuery)
+  const isDebouncing = query.trim() !== debouncedQuery.trim()
+  const isSearching = (isLoading || isDebouncing) && query.trim().length >= 2
 
   useEffect(() => {
     setActive(0)
@@ -68,7 +83,7 @@ export function CommandPalette({
         aria-label="Card search"
       >
         <div className="flex items-center gap-2 border-b border-border-strong px-3">
-          {isLoading ? (
+          {isSearching ? (
             <Loader2 className="h-4 w-4 animate-spin text-accent" />
           ) : (
             <Search className="h-4 w-4 text-dim" />
@@ -82,24 +97,31 @@ export function CommandPalette({
             className="w-full bg-transparent py-3 text-[13px] text-foreground outline-none placeholder:text-dim"
             aria-label="Card name query"
           />
-          <kbd className="rounded-sm border border-border bg-panel px-1 py-0.5 text-[10px] text-dim">ESC</kbd>
+          <kbd className="rounded-sm border border-border bg-panel px-1 py-0.5 text-[10px] text-dim">
+            ESC
+          </kbd>
         </div>
         <div className="max-h-[52vh] overflow-y-auto">
           {query.trim().length < 2 && (
-            <p className="px-3 py-4 text-[11px] text-dim">Type at least 2 characters to query /api/v1/search.</p>
+            <p className="px-3 py-4 text-[11px] text-dim">
+              Type at least 2 characters to query /api/v1/search.
+            </p>
           )}
-          {query.trim().length >= 2 && isLoading && (
+          {isSearching && (
             <div className="flex items-center justify-center gap-2 p-6 text-[12px] text-dim">
-              <Loader2 className="h-4 w-4 animate-spin text-accent" /> Resolving printings across catalog…
+              <Loader2 className="h-4 w-4 animate-spin text-accent" /> Resolving
+              printings across catalog…
             </div>
           )}
-          {query.trim().length >= 2 && !isLoading && results.length === 0 && (
-            <p className="px-3 py-4 text-[11px] text-dim">No printings found for &quot;{query}&quot;.</p>
+          {!isSearching && query.trim().length >= 2 && results.length === 0 && (
+            <p className="px-3 py-4 text-[11px] text-dim">
+              No printings found for &quot;{query}&quot;.
+            </p>
           )}
-          {!isLoading &&
+          {!isSearching &&
             results.map((r, i) => (
               <button
-                key={`${r.uuid}-${r.finish}-${i}`} // 👈 UPDATE THIS LINE
+                key={`${r.uuid}-${r.finish}-${i}`}
                 type="button"
                 onMouseEnter={() => setActive(i)}
                 onClick={() => {
@@ -112,14 +134,26 @@ export function CommandPalette({
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate">
-                    <span className={i === active ? "text-accent" : "text-foreground"}>{r.name}</span>
+                    <span
+                      className={
+                        i === active ? "text-accent" : "text-foreground"
+                      }
+                    >
+                      {r.name}
+                    </span>
                     <span className="ml-2 text-dim">{r.set_code}</span>
                     <span className="ml-2 capitalize text-dim">{r.finish}</span>
                   </div>
                 </div>
-                <span className="tnum shrink-0 text-muted-foreground">{usd(r.floor_price, { compact: true })}</span>
-                <span className="tnum shrink-0 text-[10px] text-dim">{r.vendor_count}V</span>
-                {i === active && <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-accent" />}
+                <span className="tnum shrink-0 text-muted-foreground">
+                  {usd(r.floor_price, { compact: true })}
+                </span>
+                <span className="tnum shrink-0 text-[10px] text-dim">
+                  {r.vendor_count}V
+                </span>
+                {i === active && (
+                  <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-accent" />
+                )}
               </button>
             ))}
         </div>

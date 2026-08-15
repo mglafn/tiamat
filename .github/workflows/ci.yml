@@ -17,3 +17,5 @@ jobs:
           pip install -r requirements.txt
       - name: Code Formatting Check
         run: black --check src/
+      - name: Run Unit tests
+        run: pytest test/

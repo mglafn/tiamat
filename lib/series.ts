@@ -67,11 +67,11 @@ export function buildTimeSeries(
       fwdDate.setDate(fwdDate.getDate() + k)
 
       const t = k / FWD_DAYS
-      // Quadratic acceleration interpolation from current close -> 7D target
-      const interpolatedPrice = currentPrice + (target - currentPrice) * (0.4 * t + 0.6 * t * t)
+      // Standard linear drift progression from current close -> 7D target
+      const interpolatedPrice = currentPrice + (target - currentPrice) * t
       
-      // Expanding uncertainty corridor proportional to sqrt(t) diffusion
-      const uncertaintyBand = mae * Math.sqrt(k)
+      // Normalized sqrt(t) diffusion: at k = 7 (FWD_DAYS), uncertaintyBand equals model MAE
+      const uncertaintyBand = mae * Math.sqrt(k / FWD_DAYS)
 
       points.push({
         day: k,

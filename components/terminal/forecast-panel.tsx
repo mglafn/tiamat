@@ -57,9 +57,9 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
     const plotH = H - padT - padB
     const n = points.length
     
-    const x = (i: number) => padL + (i / (n - 1)) * plotW
+    // Guard against n = 1 resulting in division by zero
+    const x = (i: number) => padL + (i / Math.max(1, n - 1)) * plotW
     const y = (val: number) => padT + (1 - (val - lo) / (hi - lo)) * plotH
-    
     const nowIdx = points.findIndex((p) => p.day === 0)
     const safeNowIdx = nowIdx === -1 ? points.length - 1 : nowIdx
 

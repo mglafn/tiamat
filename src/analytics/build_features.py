@@ -112,12 +112,12 @@ def compute_financial_indicators(db_path: str):
                 t1.*,
                 t2.current_price AS future_price_7d
             FROM fact_card_features t1
-            -- Fixed: ASOF JOIN strictly matches the closest future date >= 7 days ahead
             ASOF LEFT JOIN fact_card_features t2 
               ON t1.uuid = t2.uuid 
              AND t1.vendor = t2.vendor 
              AND t1.finish = t2.finish 
              AND t2.price_date >= t1.price_date + INTERVAL '7 days'
+             AND t2.price_date <= t1.price_date + INTERVAL '10 days'
         )
         SELECT 
             uuid, vendor, finish, price_date, current_price,
@@ -142,22 +142,25 @@ def compute_financial_indicators(db_path: str):
     print("Materializing net cross-vendor arbitrage opportunities...")
     conn.execute("""
         CREATE OR REPLACE TABLE fact_arbitrage_opportunities AS
-        WITH latest_date AS (
-            SELECT MAX(price_date) AS max_date FROM fact_prices WHERE format = 'paper'
+        WITH ranked_prices AS (
+            SELECT 
+                uuid, price_date, finish, vendor, list_type, price,
+                ROW_NUMBER() OVER(PARTITION BY uuid, vendor, finish, list_type ORDER BY price_date DESC) as rn
+            FROM fact_prices
+            WHERE format = 'paper'
         ),
         pivoted AS (
             SELECT 
-                p.uuid, p.price_date, p.finish,
-                MIN(CASE WHEN p.vendor = 'tcgplayer' AND p.list_type = 'retail' THEN p.price END) AS tcg_retail,
-                -- Fixed: Strictly buylist. Removed ck_retail coalesce fake arbitrage flaw.
-                MIN(CASE WHEN p.vendor = 'cardkingdom' AND p.list_type = 'buylist' THEN p.price END) AS ck_buylist
-            FROM fact_prices p
-            JOIN latest_date l ON p.price_date = l.max_date
-            WHERE p.format = 'paper'
-            GROUP BY p.uuid, p.price_date, p.finish
+                uuid, finish,
+                MAX(price_date) AS latest_overlap_date,
+                MIN(CASE WHEN vendor = 'tcgplayer' AND list_type = 'retail' THEN price END) AS tcg_retail,
+                MIN(CASE WHEN vendor = 'cardkingdom' AND list_type = 'buylist' THEN price END) AS ck_buylist
+            FROM ranked_prices
+            WHERE rn = 1
+            GROUP BY uuid, finish
         )
         SELECT 
-            uuid, price_date, finish,
+            uuid, latest_overlap_date AS price_date, finish,
             tcg_retail AS tcg_price,
             ck_buylist AS ck_price,
             ROUND(ck_buylist - (tcg_retail * 1.10 + 1.00), 2) AS price_spread,
