@@ -85,7 +85,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         }
       : null
 
-  // Execution signals calibrated against TCGplayer Direct rate rules
   const currentPrice = forecast?.current_price ?? 0
   const grossGainPct = forecast?.predicted_gain_pct ?? 0
   const dirAcc = forecast?.directional_accuracy_pct ?? 50.0
@@ -107,18 +106,16 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         netExpectedRoi: null,
         isDeadZoneClamped: false,
         kappaRisk: null,
-        signalLabel: "NEUTRAL / NO DATA",
-        signalTone: "text-muted-foreground font-semibold",
-        signalDescription: "Model confidence is baseline. Select a tracked asset to inspect execution signals.",
+        signalLabel: "EXECUTION HALTED",
+        signalTone: "text-warn font-semibold",
+        signalDescription: "XGBoost inference and automated execution suspended. Asset lacks verified price observations to clear the liquidity hurdle.",
       }
     }
 
-    // Landed cost basis: gross price + tax + inbound postage + freight
     const inboundPostage = currentPrice < 5.00 ? 0.99 : 0.15
     const hubFreight = 0.012
     const totalAcquisition = (currentPrice * 1.075) + inboundPostage + hubFreight
 
-    // Net Direct payout with condition downgrade risk haircut (kappa_risk)
     const targetPrice = forecast.predicted_7d_price
     const isClamped = targetPrice >= 2.50 && targetPrice <= 2.67
     const rawPayout = calculateDirectPayout(targetPrice, 0.075, true)
@@ -136,7 +133,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         kappaRisk: kappa,
         signalLabel: "STRONG ACCUMULATE",
         signalTone: "text-up font-semibold",
-        signalDescription: `Breakout catalyst confirmed (Model Accuracy: ${dirAcc.toFixed(1)}%). Risk-adjusted Net ROI (${netRoi > 0 ? "+" : ""}${netRoi.toFixed(1)}%) clears the 10.0% hurdle after all Direct fees, condition haircuts, taxes, and freight.`,
+        signalDescription: `Breakout catalyst confirmed (Model Accuracy: ${dirAcc.toFixed(1)}%). Risk-adjusted Net ROI (${netRoi > 0 ? "+" : ""}${netRoi.toFixed(1)}%) clears the 10.0% hurdle after Direct fees, condition haircuts, tax, and freight.`,
       }
     }
 
@@ -175,7 +172,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         kappaRisk: kappa,
         signalLabel: "REDUCE EXPOSURE",
         signalTone: "text-down font-semibold",
-        signalDescription: "Negative momentum trajectory detected. Consider offloading exposure into buylists.",
+        signalDescription: "Negative momentum trajectory detected. Offload exposure into buylist channels.",
       }
     }
 
@@ -204,7 +201,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
 
         {uuid && (
           <>
-            {/* Metadata */}
             <div className="rounded-sm border border-border-strong bg-surface p-2.5">
               <div className="flex items-center justify-between text-[10px] uppercase text-dim">
                 <span>Selected SKU</span>
@@ -237,7 +233,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             </div>
 
-            {/* Set printings */}
             {printings.length > 0 && (
               <div className="mt-3">
                 <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
@@ -247,17 +242,19 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                 <div className="max-h-40 overflow-y-auto divide-y divide-border/40 rounded-sm border border-border bg-surface/60">
                   {printings.map((p: CardVariant, i: number) => {
                     const isActive = p.uuid === uuid
-                    const hasPrice = p.floor_price != null
+                    const hasPrice = p.floor_price != null && p.floor_price > 0
 
                     return (
                       <button
                         key={`${p.uuid}-${p.set_code}-${i}`}
                         type="button"
                         onClick={() => onSelectUuid?.(p.uuid)}
-                        className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-[11px] transition-colors ${
+                        className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-[11px] transition-all ${
                           isActive
                             ? "border-l-2 border-accent bg-accent/20 font-semibold text-accent"
-                            : "text-foreground hover:bg-surface-2"
+                            : hasPrice
+                              ? "text-foreground hover:bg-surface-2"
+                              : "text-dim opacity-50 hover:opacity-90 hover:bg-surface-2/40"
                         }`}
                       >
                         <div className="flex items-center gap-2 truncate">
@@ -268,16 +265,12 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                         </div>
 
                         {hasPrice ? (
-                          <span
-                            className={`tnum font-mono text-[11px] ${
-                              p.floor_price === 0 ? "text-muted-foreground" : "font-medium text-foreground"
-                            }`}
-                          >
+                          <span className="tnum font-mono text-[11px] font-medium text-foreground">
                             {usd(p.floor_price)}
                           </span>
                         ) : (
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-dim/60">
-                            NO DATA
+                          <span className="rounded-sm border border-border/60 bg-surface-2 px-1 py-0.5 text-[9px] font-mono uppercase tracking-wider text-dim">
+                            UNQUOTED
                           </span>
                         )}
                       </button>
@@ -287,7 +280,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Vendor price spread */}
             {summary && dist && (
               <div className="mt-3">
                 <div className="mb-1.5 text-[10px] uppercase text-dim">Vendor Price Distribution</div>
@@ -321,8 +313,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Direct fulfillment telemetry */}
-            {forecast && (
+            {forecast ? (
               <div className="mt-3">
                 <div className="mb-1.5 text-[10px] uppercase text-dim">Direct / SYP Execution Telemetry</div>
                 <Row label="Current Close" value={usd(forecast.current_price)} />
@@ -357,27 +348,33 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
                   />
                 )}
               </div>
+            ) : (
+              <div className="mt-3 rounded-sm border border-warn/30 bg-warn/5 p-3">
+                <div className="flex items-center justify-between text-[10px] uppercase">
+                  <span className="font-semibold text-warn">EXECUTION HALTED</span>
+                  <span className="font-mono text-[9px] text-dim">CODE: ILLIQUID</span>
+                </div>
+                <p className="mt-1 text-[10px] leading-relaxed text-dim">
+                  Zero active order book depth on tracked marketplaces. Automated Direct/SYP fulfillment and margin routing are offline for this variant.
+                </p>
+              </div>
             )}
 
-            {/* Dead zone notice */}
             {isDeadZoneClamped && (
               <div className="mt-2 rounded-sm border border-warn/40 bg-warn/10 p-2 text-[10px] text-warn">
                 ⚡ <strong>Fee-Cliff Clamped:</strong> Target price was in the [$2.50, $2.67] dead zone. Exit pegged to $2.49 to optimize net margin.
               </div>
             )}
 
-            {/* Action signal */}
-            {forecast && (
-              <div className="mt-3 rounded-sm border border-border bg-surface/50 p-2.5">
-                <div className="flex items-center justify-between text-[10px] uppercase">
-                  <span className="text-dim">Execution Signal</span>
-                  <span className={signalTone}>{signalLabel}</span>
-                </div>
-                <p className="mt-1 text-[10px] leading-relaxed text-dim">
-                  {signalDescription}
-                </p>
+            <div className="mt-3 rounded-sm border border-border bg-surface/50 p-2.5">
+              <div className="flex items-center justify-between text-[10px] uppercase">
+                <span className="text-dim">Execution Signal</span>
+                <span className={signalTone}>{signalLabel}</span>
               </div>
-            )}
+              <p className="mt-1 text-[10px] leading-relaxed text-dim">
+                {signalDescription}
+              </p>
+            </div>
           </>
         )}
       </div>

@@ -34,6 +34,7 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
   const isChartError = Boolean(historyError)
   const isPartialData = Boolean(summaryError || (forecastError && history.length > 0))
   const isOverallLoading = forecastLoading || historyLoading || summaryLoading
+  const isIlliquid = !isChartLoading && !isChartError && history.length === 0
 
   const points = useMemo<DriftPoint[]>(() => {
     if (!uuid || history.length === 0) return []
@@ -58,7 +59,6 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
     const plotW = W - padL - padR
     const plotH = H - padT - padB
     
-    // Linear time mapping using true day-offsets to prevent axis warping on trading gaps
     const minDay = points[0]?.day ?? 0
     const maxDay = points[points.length - 1]?.day ?? 7
     const daySpan = Math.max(1, maxDay - minDay)
@@ -101,7 +101,6 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical series">
-      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-strong bg-surface px-3 py-1.5">
         <div className="flex items-baseline gap-2">
           <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Asset Forecast</h2>
@@ -109,6 +108,11 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
             <span className="text-[11px] text-accent">
               {name}
               {uuid && <span className="ml-2 text-dim">UUID {shortUuid(uuid)}</span>}
+              {isIlliquid && (
+                <span className="ml-2 rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[9px] font-mono text-warn">
+                  UNQUOTED
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -121,6 +125,10 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
           {isChartError ? (
             <span className="flex items-center gap-1 font-mono text-down">
               FEED OFFLINE
+            </span>
+          ) : isIlliquid ? (
+            <span className="flex items-center gap-1 font-mono text-warn">
+              ILLIQUID
             </span>
           ) : isPartialData ? (
             <span className="flex items-center gap-1 font-mono text-warn">
@@ -178,15 +186,18 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
             <span className="text-[10px] text-dim">Syncing DuckDB time series and XGBoost inference targets</span>
           </div>
         )}
-        {uuid && !isChartLoading && !isChartError && history.length === 0 && (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-dim">No Historical Trades</span>
-            <span className="text-[10px] text-dim">Zero verified price observations recorded for this finish/vendor variant</span>
+        {uuid && isIlliquid && (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 p-6 text-center">
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-warn">
+              Illiquid Instrument · Zero Order Book Depth
+            </span>
+            <span className="max-w-md text-[10px] text-dim leading-relaxed">
+              No verified secondary market transactions recorded for this finish/vendor variant. Inference targets and technical indicators suspended.
+            </span>
           </div>
         )}
         {uuid && !isChartLoading && !isChartError && geom && (
           <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price history and forecast chart">
-            {/* Horizontal Gridlines */}
             {geom.yTicks.map((t, i) => (
               <g key={i}>
                 <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="var(--border)" strokeWidth={0.5} />
@@ -195,25 +206,16 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
                 </text>
               </g>
             ))}
-            {/* Forecast Region Shading */}
             <rect x={geom.nowX} y={padT} width={Math.max(0, W - padR - geom.nowX)} height={H - padT - padB} fill="var(--accent)" opacity={0.04} />
-            {/* Uncertainty Cone */}
             {geom.cone && <polygon points={geom.cone} fill="var(--forecast)" opacity={0.16} />}
-            {/* SMA-30 Line */}
             <polyline points={geom.line("sma30")} fill="none" stroke="var(--sma30)" strokeWidth={1} strokeDasharray="2 2" />
-            {/* SMA-7 Line */}
             <polyline points={geom.line("sma7")} fill="none" stroke="var(--sma7)" strokeWidth={1.25} />
-            {/* Historical Close */}
             <polyline points={geom.line("actual")} fill="none" stroke="var(--hist)" strokeWidth={1.5} />
-            {/* Forecast Trajectory Line */}
             <polyline points={geom.line("forecast")} fill="none" stroke="var(--forecast)" strokeWidth={2} strokeDasharray="4 3" strokeLinecap="round" />
-            {/* NOW Vertical Marker */}
             <line x1={geom.nowX} y1={padT} x2={geom.nowX} y2={H - padB} stroke="var(--border-strong)" strokeWidth={1} strokeDasharray="2 2" />
-            {/* 7-Day Target Horizon Point */}
             {forecast && points.length > 0 && (
               <circle cx={geom.x(points[points.length - 1].day)} cy={geom.y(forecast.predicted_7d_price)} r={3.5} fill="var(--forecast)" stroke="var(--background)" strokeWidth={1} />
             )}
-            {/* X-axis Labels */}
             {geom.xLabels.map((l, i) => (
               <text key={i} x={l.x} y={H - 8} textAnchor="middle" fontSize={9} className={l.now ? "fill-accent font-semibold" : "fill-dim"}>
                 {l.label}
@@ -223,7 +225,6 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
         )}
       </div>
 
-      {/* Legend & Target Horizon Footer */}
       {forecast && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border bg-surface/50 px-3 py-1.5 text-[10px] uppercase">
           <Legend color="var(--hist)" label="Actual" />
