@@ -1,5 +1,6 @@
-// lib/types.ts
-// Strictly mirrors FastAPI Pydantic response schemas and client-side data contracts.
+/**
+ * Shared data contracts mirroring FastAPI Pydantic response models.
+ */
 
 export interface HealthCheck {
   status: string
@@ -52,6 +53,10 @@ export interface PredictionResponse {
   predicted_gain_pct: number
   model_mae: number
   directional_accuracy_pct?: number | null
+  expected_net_payout?: number | null
+  net_expected_roi_pct?: number | null
+  is_dead_zone_clamped?: boolean | null
+  kappa_risk?: number | null
 }
 
 export interface CardMarketSummary {

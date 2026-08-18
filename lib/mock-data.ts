@@ -1,3 +1,8 @@
+/**
+ * Deterministic mock data generator used for fallback demo mode when the backend is offline.
+ * Seeded PRNG ensures identical fixture values across renders.
+ */
+
 import type {
   ArbitrageOpportunity,
   CardMarketSummary,
@@ -37,7 +42,7 @@ interface Seed {
   name: string
   set_code: string
   base: number
-  finish: "normal" | "foil"
+  finish: "normal" | "foil" | "etched"
   vol: number
   collector_number?: string
   edhrec_rank?: number
@@ -50,13 +55,15 @@ const SEEDS: Seed[] = [
   { name: "Orcish Bowmasters", set_code: "LTR", base: 40.2, finish: "normal", vol: 1.0, collector_number: "103", edhrec_rank: 12 },
   { name: "The One Ring", set_code: "LTR", base: 58.0, finish: "normal", vol: 1.1, collector_number: "246", edhrec_rank: 8 },
   { name: "Mox Diamond", set_code: "STH", base: 680.0, finish: "foil", vol: 0.5, collector_number: "138", edhrec_rank: 110 },
+  { name: "Demonic Tutor", set_code: "STA", base: 115.0, finish: "etched", vol: 0.8, collector_number: "90", edhrec_rank: 4 },
+  { name: "Jeweled Lotus", set_code: "CMR", base: 85.0, finish: "etched", vol: 1.2, collector_number: "319", edhrec_rank: 25 },
   { name: "Underworld Breach", set_code: "THB", base: 15.1, finish: "foil", vol: 1.4, collector_number: "161", edhrec_rank: 84 },
   { name: "Grief", set_code: "MH2", base: 18.2, finish: "normal", vol: 1.2, collector_number: "87", edhrec_rank: 320 },
   { name: "Fable of the Mirror-Breaker", set_code: "NEO", base: 22.4, finish: "normal", vol: 0.8, collector_number: "141", edhrec_rank: 95 },
   { name: "Wrenn and Six", set_code: "MH1", base: 61.0, finish: "normal", vol: 0.7, collector_number: "217", edhrec_rank: 450 },
   { name: "Ancient Tomb", set_code: "TPR", base: 88.0, finish: "normal", vol: 0.6, collector_number: "236", edhrec_rank: 14 },
   { name: "Scalding Tarn", set_code: "MH2", base: 24.5, finish: "normal", vol: 0.5, collector_number: "254", edhrec_rank: 22 },
-  { name: "Ragavan, Nimble Pilferer", set_code: "MUL", base: 132.0, finish: "foil", vol: 1.0, collector_number: "86", edhrec_rank: 42 },
+  { name: "Ragavan, Nimble Pilferer", set_code: "MUL", base: 132.0, finish: "etched", vol: 1.0, collector_number: "86", edhrec_rank: 42 },
   { name: "Slickshot Show-Off", set_code: "OTJ", base: 12.8, finish: "normal", vol: 1.3, collector_number: "145", edhrec_rank: 610 },
   { name: "Vein Ripper", set_code: "MKM", base: 33.5, finish: "normal", vol: 1.5, collector_number: "110", edhrec_rank: 890 },
   { name: "Urza's Saga", set_code: "MH2", base: 42.0, finish: "normal", vol: 0.9, collector_number: "259", edhrec_rank: 15 },
@@ -65,7 +72,7 @@ const SEEDS: Seed[] = [
   { name: "Bloodstained Mire", set_code: "KTK", base: 21.0, finish: "normal", vol: 0.5, collector_number: "230", edhrec_rank: 31 },
   { name: "Nadu, Winged Wisdom", set_code: "MH3", base: 9.4, finish: "normal", vol: 1.6, collector_number: "193", edhrec_rank: 105 },
   { name: "Phlage, Titan of Fire's Fury", set_code: "MH3", base: 34.0, finish: "normal", vol: 1.1, collector_number: "197", edhrec_rank: 412 },
-  { name: "Emrakul, the Aeons Torn", set_code: "MOR", base: 76.0, finish: "normal", vol: 0.7, collector_number: "4", edhrec_rank: 380 },
+  { name: "Emrakul, the Aeons Torn", set_code: "2X2", base: 76.0, finish: "etched", vol: 0.7, collector_number: "348", edhrec_rank: 380 },
   { name: "Liliana of the Veil", set_code: "MM3", base: 19.9, finish: "normal", vol: 0.6, collector_number: "76", edhrec_rank: 215 },
   { name: "Misty Rainforest", set_code: "MH2", base: 26.5, finish: "normal", vol: 0.5, collector_number: "250", edhrec_rank: 19 },
 ]
@@ -91,7 +98,7 @@ export const CATALOG: CatalogEntry[] = SEEDS.map((seed, i) => ({
 }))
 
 const BY_UUID = new Map(CATALOG.map((c) => [c.uuid, c]))
-const TODAY = "2026-08-14"
+const TODAY = "2026-08-18"
 
 interface Metrics {
   current: number
@@ -124,7 +131,13 @@ function predict(m: Metrics, entry: CatalogEntry): { pred: number; gainPct: numb
   const momentum = (m.sma7 - m.sma30) / Math.max(m.sma30, 1)
   const rnd = mulberry32(hashSeed(entry.uuid + "pred"))
   const gainPct = round(momentum * 100.0 * 0.85 + (rnd() - 0.45) * 6.0, 2)
-  const pred = round(Math.max(0.01, m.current * (1 + gainPct / 100.0)))
+  
+  let pred = round(Math.max(0.01, m.current * (1 + gainPct / 100.0)))
+  // Dead-zone clamping ($2.50 - $2.67 -> $2.49)
+  if (pred >= 2.50 && pred <= 2.67) {
+    pred = 2.49
+  }
+  
   const maeDollars = round(m.current * 0.048, 2)
   return { pred, gainPct, maeDollars }
 }
@@ -194,9 +207,14 @@ export function mockArbitrage(minSpread: number, limit: number): ArbitrageOpport
     const rnd = mulberry32(hashSeed(entry.uuid + "arb_feed"))
     const tcg = round(m.current * (0.95 + rnd() * 0.04))
     const ckBuylist = round(tcg * (1.18 + rnd() * 0.18))
-    const costBasis = tcg * 1.075 + 0.10
-    const netSpread = round(ckBuylist - costBasis)
-    const pct = tcg > 0 ? round((netSpread / costBasis) * 100) : 0
+    
+    // Landed basis ($0.99 for <$5, $0.15 for >=$5, 7.5% tax, $0.09 CK outbound batch freight)
+    const inboundPostage = tcg < 5.00 ? 0.99 : 0.15
+    const costBasis = tcg * 1.075 + inboundPostage + 0.09
+    const ckCreditPayout = ckBuylist * 1.30
+    const netSpread = round(ckCreditPayout - costBasis)
+    const pct = costBasis > 0 ? round((netSpread / costBasis) * 100) : 0
+
     return {
       uuid: entry.uuid,
       name: entry.seed.name,
@@ -222,6 +240,7 @@ export function mockForecast(uuid: string, vendor: string, finish: string): Pred
   const m = metricsFor(entry)
   const { pred, gainPct, maeDollars } = predict(m, entry)
   const normalized = ["nonfoil", "regular"].includes(finish.toLowerCase()) ? "normal" : finish.toLowerCase()
+
   return {
     uuid,
     vendor,
@@ -241,6 +260,7 @@ export function mockSummary(uuid: string): CardMarketSummary | null {
   const { pred, gainPct } = predict(m, entry)
   const rnd = mulberry32(hashSeed(uuid + "summary_vendor"))
   const rank = entry.seed.edhrec_rank ?? (25 + Math.floor(rnd() * 1800))
+
   return {
     uuid,
     name: entry.seed.name,

@@ -1,5 +1,6 @@
 "use client"
 
+import { useMemo } from "react"
 import { useSummary, useForecast, usePrintings } from "@/lib/hooks"
 import { usd, pct, shortUuid } from "@/lib/format"
 import type { CardVariant } from "@/lib/types"
@@ -19,6 +20,34 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
   )
 }
 
+function calculateDirectPayout(price: number, taxRate = 0.075, clampDeadZone = true): number {
+  if (price < 0.40) return 0.0
+
+  const p = clampDeadZone && price >= 2.50 && price <= 2.67 ? 2.49 : price
+
+  if (p < 2.50) {
+    return Number((p * 0.50).toFixed(2))
+  }
+
+  const commission = Math.min(p * 0.0895, 75.00)
+  const processing = p * (1.0 + taxRate) * 0.025
+  const totalFee = 1.12 + commission + processing
+  return Math.max(0, Number((p - totalFee).toFixed(2)))
+}
+
+function calculateConditionRiskHaircut(
+  directPrice: number,
+  acqCost: number,
+  downgradeRate = 0.035,
+  rejectRate = 0.005,
+  salvageFactor = 0.75
+): number {
+  const safeDirect = Math.max(0.40, directPrice)
+  const downgradePenalty = (safeDirect - (salvageFactor * acqCost)) / safeDirect
+  const penalty = (downgradeRate * Math.max(0, downgradePenalty)) + (rejectRate * 1.0)
+  return Math.max(0.80, Math.min(1.00, 1.0 - penalty))
+}
+
 export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }: TelemetryPanelProps) {
   const { data: summary } = useSummary(uuid)
   const { data: forecast } = useForecast(uuid, "tcgplayer", selectedFinish)
@@ -29,7 +58,6 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
   const collectorNum = summary?.collector_number ? `#${summary.collector_number}` : ""
   const edhrecRank = summary?.edhrec_rank
 
-  // Distribution bar positioning: floor -> avg -> ceiling
   const hasValidPriceRange =
     summary != null &&
     summary.floor_price != null &&
@@ -52,49 +80,113 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
         }
       : null
 
-  // ---------------------------------------------------------------------------
-  // Quantitative Signal Validation & Confidence Safeguard
-  // ---------------------------------------------------------------------------
-  const gainPct = forecast?.predicted_gain_pct ?? 0
+  // Execution signals calibrated against TCGplayer Direct rate rules
+  const currentPrice = forecast?.current_price ?? 0
+  const grossGainPct = forecast?.predicted_gain_pct ?? 0
   const dirAcc = forecast?.directional_accuracy_pct ?? 50.0
 
-  // Statistically sound signal thresholds based on momentum + model directional edge
-  const isModerateConfidence = Math.abs(gainPct) >= 2.5 && dirAcc > 50.0
-  const isHighConfidence = Math.abs(gainPct) >= 5.0 && dirAcc > 52.0
-
-  let signalLabel = "NEUTRAL / INSUFFICIENT DATA"
-  let signalTone = "text-muted-foreground font-semibold"
-  let signalDescription =
-    "Model confidence is baseline. Hold current position or gather more market depth."
-
-  if (forecast) {
-    if (gainPct >= 5.0 && isHighConfidence) {
-      signalLabel = "STRONG ACCUMULATE"
-      signalTone = "text-up font-semibold"
-      signalDescription =
-        "High directional confidence with >5% 7-day projected price drift across primary liquidity pools."
-    } else if (gainPct >= 2.5 && isModerateConfidence) {
-      signalLabel = "ACCUMULATE"
-      signalTone = "text-up font-semibold"
-      signalDescription =
-        "Moderate upward momentum detected based on SMA cross ratios and quantitative indicators."
-    } else if (gainPct <= -5.0 && isHighConfidence) {
-      signalLabel = "STRONG REDUCE"
-      signalTone = "text-down font-semibold"
-      signalDescription =
-        "High probability of downward mean reversion or buybox degradation over the 7-day horizon."
-    } else if (gainPct <= -2.5 && isModerateConfidence) {
-      signalLabel = "REDUCE EXPOSURE"
-      signalTone = "text-down font-semibold"
-      signalDescription =
-        "Negative momentum trajectory detected. Consider realizing spreads via buylists."
-    } else {
-      signalLabel = "NEUTRAL HOLD"
-      signalTone = "text-dim font-semibold"
-      signalDescription =
-        "Projected price movement is flat or model directional edge is not statistically significant."
+  const {
+    acquisitionCost,
+    expectedExitPayout,
+    netExpectedRoi,
+    isDeadZoneClamped,
+    kappaRisk,
+    signalLabel,
+    signalTone,
+    signalDescription
+  } = useMemo(() => {
+    if (!forecast || currentPrice <= 0) {
+      return {
+        acquisitionCost: null,
+        expectedExitPayout: null,
+        netExpectedRoi: null,
+        isDeadZoneClamped: false,
+        kappaRisk: null,
+        signalLabel: "NEUTRAL / NO DATA",
+        signalTone: "text-muted-foreground font-semibold",
+        signalDescription: "Model confidence is baseline. Select a tracked asset to inspect execution signals.",
+      }
     }
-  }
+
+    // Landed cost basis: gross price + tax + inbound postage + freight
+    const inboundPostage = currentPrice < 5.00 ? 0.99 : 0.15
+    const hubFreight = 0.012
+    const totalAcquisition = (currentPrice * 1.075) + inboundPostage + hubFreight
+
+    // Net Direct payout with condition downgrade risk haircut (kappa_risk)
+    const targetPrice = forecast.predicted_7d_price
+    const isClamped = targetPrice >= 2.50 && targetPrice <= 2.67
+    const rawPayout = calculateDirectPayout(targetPrice, 0.075, true)
+    
+    const kappa = forecast.kappa_risk ?? calculateConditionRiskHaircut(targetPrice, totalAcquisition)
+    const netPayout = forecast.expected_net_payout ?? (rawPayout * kappa)
+    const netRoi = forecast.net_expected_roi_pct ?? (((netPayout - totalAcquisition) / totalAcquisition) * 100.0)
+
+    if (netRoi >= 10.0 && dirAcc >= 60.0) {
+      return {
+        acquisitionCost: totalAcquisition,
+        expectedExitPayout: netPayout,
+        netExpectedRoi: netRoi,
+        isDeadZoneClamped: isClamped,
+        kappaRisk: kappa,
+        signalLabel: "STRONG ACCUMULATE",
+        signalTone: "text-up font-semibold",
+        signalDescription: `Breakout catalyst confirmed (Model Accuracy: ${dirAcc.toFixed(1)}%). Risk-adjusted Net ROI (${netRoi > 0 ? "+" : ""}${netRoi.toFixed(1)}%) clears the 10.0% hurdle after all Direct fees, condition haircuts, taxes, and freight.`,
+      }
+    }
+
+    if (netRoi >= 0.0 && grossGainPct >= 4.5) {
+      return {
+        acquisitionCost: totalAcquisition,
+        expectedExitPayout: netPayout,
+        netExpectedRoi: netRoi,
+        isDeadZoneClamped: isClamped,
+        kappaRisk: kappa,
+        signalLabel: "ACCUMULATE",
+        signalTone: "text-up font-semibold",
+        signalDescription: `Projected price gain (+${grossGainPct.toFixed(1)}%) clears the landed friction baseline. Risk-adjusted net margin is positive (+${netRoi.toFixed(1)}%).`,
+      }
+    }
+
+    if (grossGainPct <= -15.0) {
+      return {
+        acquisitionCost: totalAcquisition,
+        expectedExitPayout: netPayout,
+        netExpectedRoi: netRoi,
+        isDeadZoneClamped: isClamped,
+        kappaRisk: kappa,
+        signalLabel: "STRONG REDUCE",
+        signalTone: "text-down font-semibold",
+        signalDescription: "Severe downward momentum detected. High probability of buybox collapse or liquidity exhaustion over the 7-day horizon.",
+      }
+    }
+
+    if (grossGainPct <= -5.0) {
+      return {
+        acquisitionCost: totalAcquisition,
+        expectedExitPayout: netPayout,
+        netExpectedRoi: netRoi,
+        isDeadZoneClamped: isClamped,
+        kappaRisk: kappa,
+        signalLabel: "REDUCE EXPOSURE",
+        signalTone: "text-down font-semibold",
+        signalDescription: "Negative momentum trajectory detected. Consider offloading exposure into buylists.",
+      }
+    }
+
+    return {
+      acquisitionCost: totalAcquisition,
+      expectedExitPayout: netPayout,
+      netExpectedRoi: netRoi,
+      isDeadZoneClamped: isClamped,
+      kappaRisk: kappa,
+      signalLabel: "NEUTRAL HOLD",
+      signalTone: "text-dim font-semibold",
+      signalDescription: grossGainPct > 0 
+        ? `Projected gross gain (+${grossGainPct.toFixed(1)}%) is insufficient to overcome Direct fulfillment friction, condition risk, and landed costs. Net ROI is negative (${netRoi.toFixed(1)}%).`
+        : "Asset is in a low-volatility resting state. Model confidence threshold not triggered.",
+    }
+  }, [forecast, currentPrice, grossGainPct, dirAcc])
 
   return (
     <section className="flex min-h-0 flex-col border-l border-border-strong bg-panel" aria-label="Execution telemetry">
@@ -107,7 +199,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
 
         {uuid && (
           <>
-            {/* Selected SKU Metadata */}
+            {/* Metadata */}
             <div className="rounded-sm border border-border-strong bg-surface p-2.5">
               <div className="flex items-center justify-between text-[10px] uppercase text-dim">
                 <span>Selected SKU</span>
@@ -140,7 +232,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             </div>
 
-            {/* Available Printings */}
+            {/* Set printings */}
             {printings.length > 0 && (
               <div className="mt-3">
                 <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
@@ -190,7 +282,7 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Price Distribution */}
+            {/* Vendor price spread */}
             {summary && dist && (
               <div className="mt-3">
                 <div className="mb-1.5 text-[10px] uppercase text-dim">Vendor Price Distribution</div>
@@ -224,29 +316,52 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
               </div>
             )}
 
-            {/* Model Inference Telemetry */}
+            {/* Direct fulfillment telemetry */}
             {forecast && (
               <div className="mt-3">
-                <div className="mb-1.5 text-[10px] uppercase text-dim">XGBoost Inference Telemetry</div>
+                <div className="mb-1.5 text-[10px] uppercase text-dim">Direct / SYP Execution Telemetry</div>
                 <Row label="Current Close" value={usd(forecast.current_price)} />
-                <Row label="Projected 7D" value={usd(forecast.predicted_7d_price)} tone="text-forecast font-medium" />
+                {acquisitionCost != null && (
+                  <Row label="Landed Cost Basis" value={usd(acquisitionCost)} tone="text-muted-foreground" />
+                )}
+                <Row label="Projected 7D Target" value={usd(forecast.predicted_7d_price)} tone="text-forecast font-medium" />
+                {expectedExitPayout != null && (
+                  <Row label="Risk-Adj. Net Payout" value={usd(expectedExitPayout)} tone="text-foreground font-medium" />
+                )}
                 <Row
-                  label="Expected Return"
+                  label="Gross Return"
                   value={pct(forecast.predicted_gain_pct)}
                   tone={forecast.predicted_gain_pct >= 0 ? "text-up font-medium" : "text-down font-medium"}
                 />
+                {netExpectedRoi != null && (
+                  <Row
+                    label="Net Expected ROI"
+                    value={pct(netExpectedRoi)}
+                    tone={netExpectedRoi >= 10.0 ? "text-up font-bold" : netExpectedRoi >= 0 ? "text-up font-medium" : "text-down"}
+                  />
+                )}
+                {kappaRisk != null && (
+                  <Row label="Condition Haircut (κ)" value={`${(kappaRisk * 100).toFixed(1)}%`} tone="text-dim" />
+                )}
                 <Row label="Error Bound (MAE)" value={`±${usd(forecast.model_mae)}`} tone="text-muted-foreground" />
                 {forecast.directional_accuracy_pct != null && (
                   <Row 
-                    label="Directional Accuracy" 
+                    label="Model Directional Accuracy" 
                     value={`${forecast.directional_accuracy_pct}%`} 
-                    tone={isHighConfidence ? "text-up font-medium" : "text-dim"} 
+                    tone={forecast.directional_accuracy_pct >= 60 ? "text-up font-medium" : "text-dim"} 
                   />
                 )}
               </div>
             )}
 
-            {/* Confidence / Action Signal */}
+            {/* Dead zone notice */}
+            {isDeadZoneClamped && (
+              <div className="mt-2 rounded-sm border border-warn/40 bg-warn/10 p-2 text-[10px] text-warn">
+                ⚡ <strong>Fee-Cliff Clamped:</strong> Target price was in the [$2.50, $2.67] dead zone. Exit pegged to $2.49 to optimize net margin.
+              </div>
+            )}
+
+            {/* Action signal */}
             {forecast && (
               <div className="mt-3 rounded-sm border border-border bg-surface/50 p-2.5">
                 <div className="flex items-center justify-between text-[10px] uppercase">
