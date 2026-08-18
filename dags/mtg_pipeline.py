@@ -1,3 +1,7 @@
+"""
+Airflow DAG for daily MTG pricing ETL, feature engineering, and model training.
+"""
+
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -25,21 +29,25 @@ with DAG(
     task_extract_raw = BashOperator(
         task_id='extract_raw_prices',
         bash_command=f'python3 {BASE_DIR}/src/etl/download_raw.py',
+        cwd=str(BASE_DIR),
     )
 
     task_load_duckdb = BashOperator(
         task_id='load_duckdb_tables',
         bash_command=f'python3 {BASE_DIR}/src/etl/load_duckdb.py',
+        cwd=str(BASE_DIR),
     )
 
     task_build_features = BashOperator(
         task_id='build_financial_features',
         bash_command=f'python3 {BASE_DIR}/src/analytics/build_features.py',
+        cwd=str(BASE_DIR),
     )
 
     task_train_model = BashOperator(
         task_id='train_xgboost_forecast',
         bash_command=f'python3 {BASE_DIR}/src/analytics/train_forecast.py',
+        cwd=str(BASE_DIR),
     )
 
     task_extract_raw >> task_load_duckdb >> task_build_features >> task_train_model

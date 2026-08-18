@@ -1,3 +1,14 @@
+"""
+CLI runner for the MTG financial arbitrage and forecasting pipeline.
+
+Executes and verifies sequential stages:
+  - Step A: Download & decompress MTGJSON feeds (download_raw.py)
+  - Step B: Streaming batch ingestion into DuckDB (load_duckdb.py)
+  - Step C: Columnar feature engineering & ASOF windowing (build_features.py)
+  - Step D: Two-stage hurdle XGBoost training & threshold tuning (train_forecast.py)
+  - Step E: Friction-calibrated backtest (backtest.py)
+"""
+
 import os
 import sys
 import time
@@ -16,44 +27,42 @@ MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
 
 def log_step(title: str):
-    print("\n============================================================")
-    print(f" 🚀 {title}")
-    print("============================================================")
+    print(f"\n--- {title} ---")
 
 
 def log_status(substep: str, passed: bool, message: str = ""):
-    symbol = "  [✓] " if passed else "  [⚡] "
-    status = "EXISTS / VALID" if passed else "MISSING / REBUILDING"
-    print(f"{symbol}{substep:<48} -> {status} {f'({message})' if message else ''}")
+    status = "OK" if passed else "REBUILD NEEDED"
+    extra = f" ({message})" if message else ""
+    print(f"  [{status:<14}] {substep}{extra}")
 
 
 def check_step_a() -> bool:
-    """Step A Check: Raw Payload Download & Decompression"""
+    """Verify raw MTGJSON JSON/CSV downloads exist and are uncorrupted."""
     if not RAW_JSON_PATH.exists() or not RAW_CARDS_CSV_PATH.exists():
-        log_status("Substep A.1: Raw data feeds existence", False)
+        log_status("Raw data feeds present", False)
         return False
 
     file_size_mb = RAW_JSON_PATH.stat().st_size / (1024 * 1024)
     if file_size_mb < 300:
-        log_status("Substep A.2: File size verification (>300MB)", False, f"{file_size_mb:.1f} MB found")
+        log_status("Raw file size check (>300MB)", False, f"{file_size_mb:.1f} MB found")
         return False
 
-    log_status("Substep A.1: Raw data feeds existence", True)
-    log_status("Substep A.2: File size verification (>300MB)", True, f"{file_size_mb:.1f} MB")
+    log_status("Raw data feeds present", True)
+    log_status("Raw file size check (>300MB)", True, f"{file_size_mb:.1f} MB")
     return True
 
 
 def check_step_b(skip_freshness: bool = False) -> bool:
-    """Step B Check: DuckDB Ingestion, Table Loading & Freshness"""
+    """Verify DuckDB fact_prices and dim_cards tables exist and are populated."""
     if not DB_PATH.exists():
-        log_status("Substep B.1: DuckDB database file existence", False)
+        log_status("DuckDB database file", False)
         return False
 
     try:
         conn = duckdb.connect(str(DB_PATH), read_only=True)
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
         if "fact_prices" not in tables or "dim_cards" not in tables:
-            log_status("Substep B.2: 'fact_prices' and 'dim_cards' existence", False)
+            log_status("fact_prices and dim_cards tables", False)
             conn.close()
             return False
 
@@ -61,7 +70,7 @@ def check_step_b(skip_freshness: bool = False) -> bool:
         dim_count = conn.execute("SELECT COUNT(*) FROM dim_cards").fetchone()[0]
 
         if count == 0 or dim_count == 0:
-            log_status("Substep B.3: Table row counts (>0)", False)
+            log_status("Table row count (>0)", False)
             conn.close()
             return False
 
@@ -69,7 +78,7 @@ def check_step_b(skip_freshness: bool = False) -> bool:
         conn.close()
 
         if max_date_res is None:
-            log_status("Substep B.4: Price data freshness verification", False, "No dates logged")
+            log_status("Price data freshness", False, "No dates recorded")
             return False
 
         if isinstance(max_date_res, str):
@@ -81,31 +90,30 @@ def check_step_b(skip_freshness: bool = False) -> bool:
 
         if not skip_freshness:
             days_lag = (datetime.date.today() - max_date).days
-            if days_lag > 2:
+            if days_lag > 3:
                 log_status(
-                    "Substep B.4: Price data freshness verification",
+                    "Price data freshness",
                     False,
-                    f"Data is stale ({days_lag} days old, latest: {max_date})",
+                    f"Data is {days_lag} days old (latest: {max_date})",
                 )
                 return False
-            log_status("Substep B.4: Price data freshness verification", True, f"Latest date: {max_date}")
+            log_status("Price data freshness", True, f"Latest: {max_date}")
         else:
-            log_status("Substep B.4: Price data freshness verification", True, f"SKIPPED (Latest: {max_date})")
+            log_status("Price data freshness", True, f"Skipped (Latest: {max_date})")
 
-        log_status("Substep B.1: DuckDB database file existence", True)
-        log_status("Substep B.2: 'fact_prices' and 'dim_cards' existence", True)
-        log_status("Substep B.3: Table row counts", True, f"Fact: {count:,} | Dim: {dim_count:,}")
+        log_status("DuckDB database file", True)
+        log_status("Tables fact_prices and dim_cards", True, f"Fact: {count:,} | Dim: {dim_count:,}")
         return True
 
     except Exception as e:
-        log_status("Substep B: Database check error", False, str(e))
+        log_status("Database integrity check", False, str(e))
         return False
 
 
 def check_step_c() -> bool:
-    """Step C Check: SQL Feature Engineering & Analytical Tables"""
+    """Verify analytical feature tables and ASOF views exist."""
     if not DB_PATH.exists():
-        log_status("Substep C.1: Analytical feature tables existence", False)
+        log_status("Feature tables check", False, "Database missing")
         return False
 
     try:
@@ -118,7 +126,7 @@ def check_step_c() -> bool:
         ]
         missing = [t for t in required_tables if t not in tables]
         if missing:
-            log_status("Substep C.1: Required feature tables existence", False, f"Missing: {missing}")
+            log_status("Feature tables presence", False, f"Missing: {missing}")
             conn.close()
             return False
 
@@ -127,102 +135,111 @@ def check_step_c() -> bool:
         conn.close()
 
         if train_count == 0:
-            log_status("Substep C.2: Analytical dataset synchronization", False, "Empty feature tables")
+            log_status("Feature dataset populated", False, "Zero labeled training rows")
             return False
 
-        log_status("Substep C.1: Feature & Arbitrage tables existence", True)
-        log_status("Substep C.2: Training dataset row count", True, f"{train_count:,} rows")
-        log_status("Substep C.3: Arbitrage opportunities logged", True, f"{arb_count:,} spreads")
+        log_status("Feature & Arbitrage tables", True, f"Train: {train_count:,} | Arb spreads: {arb_count:,}")
         return True
 
     except Exception as e:
-        log_status("Substep C: Feature check error", False, str(e))
+        log_status("Feature tables check", False, str(e))
         return False
 
 
 def check_step_d() -> bool:
-    """Step D Check: Trained XGBoost Model Artifact & Schema Validation"""
+    """Verify saved XGBoost model artifact is valid and readable."""
     if not MODEL_PATH.exists():
-        log_status("Substep D.1: Model artifact existence", False)
+        log_status("Model artifact file", False)
         return False
 
     try:
         artifact = joblib.load(MODEL_PATH)
-        if "model" not in artifact or "metrics" not in artifact:
-            log_status("Substep D.2: Artifact schema validation", False)
+        if ("classifier" not in artifact and "model" not in artifact) or "metrics" not in artifact:
+            log_status("Model artifact schema", False)
             return False
 
         metrics = artifact["metrics"]
         mae = metrics.get("mae_pct", metrics.get("mae", 0.0))
         naive_mae = metrics.get("naive_mae_pct", None)
+        tau = metrics.get("prob_threshold", None)
+        acc = metrics.get("directional_accuracy_pct", None)
 
-        log_status("Substep D.1: Model artifact existence", True)
-        edge_msg = f"MAE: {mae:.2f}% | Baseline: {naive_mae:.2f}%" if naive_mae else f"MAE: {mae:.2f}%"
-        log_status("Substep D.2: Model artifact integrity", True, edge_msg)
+        edge_msg = f"MAE: {mae:.2f}% | Baseline: {naive_mae:.2f}% | tau: {tau} | DirAcc: {acc}%" if naive_mae else f"MAE: {mae:.2f}%"
+        log_status("Model artifact integrity", True, edge_msg)
         return True
 
     except Exception as e:
-        log_status("Substep D: Model load check error", False, str(e))
+        log_status("Model artifact load", False, str(e))
         return False
 
 
-def execute_script(script_path: Path):
+def execute_script(script_path: Path, extra_args: list = None):
     start_time = time.time()
-    subprocess.run([sys.executable, str(script_path)], check=True)
+    cmd = [sys.executable, str(script_path)] + (extra_args or [])
+    subprocess.run(cmd, check=True)
     elapsed = time.time() - start_time
-    print(f"\n  ⏱️ Script [{script_path.name}] completed in {elapsed:.2f} seconds.")
+    print(f"Finished {script_path.name} in {elapsed:.2f}s")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified Idempotent Local Pipeline Runner")
-    parser.add_argument("--force", "-f", action="store_true", help="Force re-execution of selected steps.")
-    parser.add_argument("--analytics-only", "-a", action="store_true", help="Skip raw ETL and run Feature Engineering + Training.")
-    parser.add_argument("--build-only", action="store_true", help="Only run SQL Feature Engineering.")
-    parser.add_argument("--train-only", action="store_true", help="Only run XGBoost Model Training.")
-    parser.add_argument("--skip-freshness", action="store_true", help="Do not fail ETL if historical prices are older than 2 days.")
+    parser = argparse.ArgumentParser(description="Unified pipeline runner for MTG pricing & ML forecast engine")
+    parser.add_argument("--force", "-f", action="store_true", help="Force re-run of all pipeline stages")
+    parser.add_argument("--analytics-only", "-a", action="store_true", help="Skip raw ETL; run feature build and model training")
+    parser.add_argument("--build-only", action="store_true", help="Only run SQL feature engineering")
+    parser.add_argument("--train-only", action="store_true", help="Only run model training")
+    parser.add_argument("--backtest", "-b", action="store_true", help="Run backtest after training")
+    parser.add_argument("--backtest-only", action="store_true", help="Only run the backtest engine")
+    parser.add_argument("--hurdle", type=float, default=10.0, help="Backtest minimum net ROI %% hurdle (default: 10.0)")
+    parser.add_argument("--skip-freshness", action="store_true", help="Allow stale data older than 3 days")
     args = parser.parse_args()
 
-    print("============================================================")
-    print(" 🛠️ STARTING UNIFIED LOCAL PIPELINE RUNNER")
-    print("============================================================")
+    print("Running MTG Analytics Pipeline...")
 
+    if args.backtest_only:
+        log_step("Step E: Quantitative Backtest")
+        execute_script(BASE_DIR / "src" / "analytics" / "backtest.py", ["--hurdle", str(args.hurdle)])
+        return
+
+    # Raw ETL (Stages A & B)
     if not (args.analytics_only or args.build_only or args.train_only):
-        log_step("STEP A: Checking Raw Data Feed (ETL Ingestion)")
+        log_step("Step A: Raw Feed Download (download_raw.py)")
         if args.force or not check_step_a():
-            print("\n  Executing Step A (download_raw.py)...")
             execute_script(BASE_DIR / "src" / "etl" / "download_raw.py")
         else:
-            print("  ⏩ Skipping Step A — Raw data payloads are already downloaded & extracted.")
+            print("  Raw data up to date. Skipping.")
 
-        log_step("STEP B: Checking DuckDB Ingestion (load_duckdb.py)")
+        log_step("Step B: DuckDB Ingestion (load_duckdb.py)")
         if args.force or not check_step_b(skip_freshness=args.skip_freshness):
-            print("\n  Executing Step B (load_duckdb.py)...")
             execute_script(BASE_DIR / "src" / "etl" / "load_duckdb.py")
         else:
-            print("  ⏩ Skipping Step B — DuckDB 'fact_prices' and 'dim_cards' tables are ready.")
+            print("  DuckDB fact/dim tables up to date. Skipping.")
     else:
-        print("\n  ⏩ Skipping Raw Ingestion Steps A & B (Targeting Analytics/Training only).")
+        print("Skipping Raw ETL stages.")
 
+    # Feature Engineering (Stage C)
     if not args.train_only:
-        log_step("STEP C: Checking Feature Engineering (build_features.py)")
+        log_step("Step C: Feature Engineering (build_features.py)")
         if args.force or args.analytics_only or args.build_only or not check_step_c():
-            print("\n  Executing Step C (build_features.py)...")
             execute_script(BASE_DIR / "src" / "analytics" / "build_features.py")
         else:
-            print("  ⏩ Skipping Step C — Feature tables & Arbitrage views are up to date.")
+            print("  Feature store up to date. Skipping.")
 
+    # Model Training (Stage D)
     if not args.build_only:
-        log_step("STEP D: Checking XGBoost Model Training (train_forecast.py)")
+        log_step("Step D: Model Training (train_forecast.py)")
         if args.force or args.analytics_only or args.train_only or not check_step_d():
-            print("\n  Executing Step D (train_forecast.py)...")
             execute_script(BASE_DIR / "src" / "analytics" / "train_forecast.py")
         else:
-            print("  ⏩ Skipping Step D — Trained model artifact is up to date.")
+            print("  Model artifact up to date. Skipping.")
 
-    print("\n============================================================")
-    print(" 🎉 PIPELINE EXECUTION COMPLETE!")
-    print(" Run the API microservice with: python src/api/main.py")
-    print("============================================================")
+    # Backtest (Stage E)
+    if args.backtest:
+        log_step("Step E: Quantitative Backtest (backtest.py)")
+        execute_script(BASE_DIR / "src" / "analytics" / "backtest.py", ["--hurdle", str(args.hurdle)])
+
+    print("\nPipeline finished successfully.")
+    print("Start API server : python src/api/main.py")
+    print("Start Frontend   : npm run dev\n")
 
 
 if __name__ == "__main__":
