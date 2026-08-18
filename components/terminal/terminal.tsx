@@ -1,4 +1,5 @@
 "use client"
+
 import { useCallback, useEffect, useState } from "react"
 import { StatusBar } from "./status-bar"
 import { Ticker } from "./ticker"
@@ -11,11 +12,11 @@ import { CommandPalette } from "./command-palette"
 export function Terminal() {
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
   const [selectedFinish, setSelectedFinish] = useState<string>("normal")
-  const [minSpread, setMinSpread] = useState(0) // Default to 0 so the whole catalogue is instantly visible
+  const [minSpread, setMinSpread] = useState(0)
   const [finish, setFinish] = useState("all")
   const [paletteOpen, setPaletteOpen] = useState(false)
   
-  // Global ⌘K / Ctrl+K to open search
+  // Global ⌘K search shortcut
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {

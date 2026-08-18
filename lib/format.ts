@@ -1,4 +1,6 @@
-// lib/format.ts
+/**
+ * Number formatting and presentation helpers for currency, percentages, and identifiers.
+ */
 
 export function usd(
   n: number | null | undefined,

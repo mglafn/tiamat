@@ -1,4 +1,3 @@
-// components/terminal/ticker.tsx
 "use client"
 
 import { useMemo } from "react"
@@ -12,7 +11,6 @@ export function Ticker() {
   const items = useMemo(() => {
     return rows.slice(0, 16).map((r) => {
       const meta = catalog.get(r.uuid)
-      // Prioritize the name & set already attached to the arbitrage row
       const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)
       const set = r.set_code ?? meta?.set_code
 
@@ -29,16 +27,15 @@ export function Ticker() {
     return <div className="h-7 border-b border-border bg-panel" />
   }
 
+  // Duplicate items array for seamless CSS marquee looping
   const doubled = [...items, ...items]
 
   return (
     <div className="relative flex h-7 items-center overflow-hidden border-b border-border bg-panel">
-      {/* Fixed Sticky Header Label */}
       <span className="z-10 flex h-full shrink-0 items-center border-r border-border-strong bg-surface-2 px-2.5 text-[10px] font-semibold uppercase tracking-widest text-accent">
         TICKER
       </span>
 
-      {/* Scrolling Container */}
       <div className="flex w-max shrink-0 animate-ticker whitespace-nowrap">
         {doubled.map((item, i) => (
           <span

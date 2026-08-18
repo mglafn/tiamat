@@ -1,100 +1,100 @@
-# Enterprise Financial Arbitrage & Asset Forecasting Engine
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![DuckDB](https://img.shields.io/badge/DuckDB-In--Memory%20Analytics-yellow.svg)](https://duckdb.org/)
-[![XGBoost](https://img.shields.io/badge/XGBoost-Time--Series%20Forecasting-green.svg)](https://xgboost.ai/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-REST%20Microservice-009688.svg)](https://fastapi.tiangolo.com/)
+# MTG Financial Arbitrage & Price Forecasting Engine
 
-An end-to-end analytical pipeline and RESTful microservice built to detect cross-vendor price arbitrage and forecast 7-day forward asset valuations across secondary financial market data. 
+An analytical pipeline, REST microservice, and trading terminal designed to detect cross-vendor price arbitrage and forecast 7-day forward returns for secondary Magic: The Gathering singles.
 
-Engineered to handle high-volume, deeply nested JSON payloads (>1.2GB) with near-zero memory footprint using memory-mapped streaming ETL, DuckDB analytical windowing, and XGBoost gradient boosting.
+Processes the MTGJSON pricing feed (>1.2GB) with a sub-150MB memory footprint using streaming ETL (`ijson`), columnar windowing in DuckDB, and a two-stage hurdle XGBoost forecasting model.
 
 ---
 
-## 💡 System Architecture
+## Architecture Overview
 
 ```
-┌─────────────────────────┐
-│ MTGJSON Pricing Feed   │
-│ (1.2GB Compressed JSON) │
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐      Lazy Stream      ┌─────────────────────────┐
-│ Memory-Efficient ETL    ├──────────────────────►│ DuckDB Analytical Engine│
-│ (ijson + Pandas)        │  Batch Ingestion      │ (fact_prices)           │
-└─────────────────────────┘                       └────────────┬────────────┘
-                                                               │
-                                                               ▼
-┌─────────────────────────┐   Window Functions    ┌─────────────────────────┐
-│ FastAPI Microservice    │◄──────────────────────┤ Feature Engineering &   │
-│ (Arbitrage & Inference) │   Model Predictions   │ ML Dataset Generation   │
-└─────────────────────────┘                       └─────────────────────────┘
+[MTGJSON Feed] ──(Streaming ijson)──► [DuckDB: fact_prices]
+                                             │
+                                     (Window Functions & ASOF Joins)
+                                             │
+                                             ▼
+                                   [DuckDB Feature Store]
+                                   ├── fact_card_features
+                                   ├── fact_training_dataset
+                                   └── fact_arbitrage_opportunities
+                                             │
+                                      (XGBoost Model)
+                                             │
+                                             ▼
+                                  [FastAPI Microservice] ──► [Next.js Terminal]
 ```
 
 ---
 
-## 🛠️ Tech Stack & Key Design Decisions
+## Key Design Decisions
 
-* **Streaming Extraction (`ijson`):** Lazily parses 1.2GB+ nested JSON structures without loading the full payload into RAM, keeping peak memory usage under **150MB**.
-* **Analytical Data Warehouse (`DuckDB`):** Executes high-performance SQL window functions (`LAG`, `LEAD`, `AVG OVER`) directly on persistent columnar storage to generate 7-day/30-day Simple Moving Averages (SMA), daily returns, and cross-vendor spreads.
-* **Predictive Modeling (`XGBoost`):** Out-of-time split (80/20 time-series split) trained on historical price indicators to predict 7-day forward asset movements.
-* **Microservice Layer (`FastAPI`):** Asynchronous REST API serving low-latency arbitrage queries and real-time model inference.
+- **Memory-Safe Extraction (`ijson`):** Lazily streams nested JSON pricing records into DuckDB in fixed-size batches, avoiding full memory allocation of the 1.2GB payload.
+- **Analytical Storage (`DuckDB`):** Executes rolling technical indicators (`SMA-7`, `SMA-30`, volatility, spread velocity) and temporal `ASOF` joins directly in columnar storage.
+- **Two-Stage Hurdle Model (`XGBoost`):** 
+  - *Stage 1:* Binary classifier predicting breakout catalyst probability ($P(|\Delta| \ge 4.5\%)$).
+  - *Stage 2:* Conditional regressor estimating magnitude on movers using L1 loss.
+  - Probability decision thresholds ($\tau$) are tuned strictly on validation splits with 14-day anti-leakage embargoes.
+- **Friction-Calibrated Unit Economics:** Implements exact TCGplayer Direct rate cards, Banker's rounding (`ROUND_HALF_EVEN`), dead-band price clamping ($2.50 to $2.67), Card Kingdom store credit math (+30%), and condition downgrade risk adjustments ($\kappa_{\text{risk}}$).
 
 ---
 
-## 🚀 Getting Started
+## Quickstart
 
 ### 1. Prerequisites
-Ensure you have Python 3.10+ installed.
+Python 3.10+ and Node.js 18+
 
 ```bash
 git clone https://github.com/mglafn/mtg-financial-arbitrage.git
 cd mtg-financial-arbitrage
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+npm install
 ```
 
-### 2. Execution Pipeline
+### 2. Run the End-to-End Pipeline
 
-#### Step A: Download & Ingest Raw Data
-Downloads the compressed MTGJSON price payload, decompresses it in memory-safe chunks, and ingests flattened records into DuckDB.
+Run the automated orchestrator to download raw data, build features, and train the model:
+
 ```bash
-python src/etl/download_raw.py
-python src/etl/load_duckdb.py
+python run_pipeline.py
 ```
 
-#### Step B: Feature Engineering & Indicator Calculation
-Executes SQL windowing scripts to generate rolling SMAs, daily returns, and cross-vendor arbitrage spreads.
-```bash
-python src/analytics/build_features.py
-```
+Optional flags:
+- `--analytics-only`: Re-run feature store generation and training without downloading raw data.
+- `--backtest`: Execute the out-of-time backtest suite after training.
+- `--hurdle 10.0`: Specify minimum expected net ROI hurdle percentage for the backtest.
 
-#### Step C: Train XGBoost Forecasting Model
-Trains the gradient boosting model on historical price points and persists model artifacts.
-```bash
-python src/analytics/train_forecast.py
-```
+### 3. Start Backend & Terminal
 
-#### Step D: Spin Up FastAPI Microservice
-Starts the local API server.
+Start the FastAPI microservice:
 ```bash
 python src/api/main.py
 ```
-* Access Interactive API Docs (Swagger UI): `http://localhost:8000/docs`
+* Interactive API docs: `http://localhost:8000/docs`
+
+Start the frontend terminal client:
+```bash
+npm run dev
+```
+* Terminal UI: `http://localhost:3000`
 
 ---
 
-## 📊 API Endpoint Overview
+## API Endpoints
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Health check verifying DuckDB connection and model load state |
-| `GET` | `/api/v1/arbitrage` | Returns top cross-vendor price spread opportunities (filtering by `min_spread`) |
-| `GET` | `/api/v1/forecast/{uuid}` | Serves 7-day forward XGBoost price predictions for a specific asset |
+| `GET` | `/health` | Diagnostic status of DuckDB connection and model loading |
+| `GET` | `/api/v1/arbitrage` | Top cross-vendor spreads filtered by `min_spread` and `finish` |
+| `GET` | `/api/v1/forecast/{uuid}` | 7-day XGBoost price prediction and condition-adjusted net payout |
+| `GET` | `/api/v1/card/history/{uuid}` | Verified price observations with rolling SMAs |
+| `GET` | `/api/v1/card/summary/{uuid}` | Market price distribution and vendor overview |
+| `GET` | `/api/v1/search` | Name autocomplete and catalog resolution |
 
 ---
 
-## 📝 License
-Distributed under the MIT License.
+## License
+MIT

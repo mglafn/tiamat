@@ -58,7 +58,7 @@ export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
 
   return (
     <header className="flex h-9 items-center gap-4 border-b border-border-strong bg-surface px-3 text-[11px] uppercase tracking-wider">
-      {/* Engine Live / Degraded Indicator */}
+      {/* Connection indicator */}
       <div className="flex items-center gap-2">
         <span
           className={`h-2 w-2 rounded-full ${
@@ -75,7 +75,6 @@ export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
         </span>
       </div>
 
-      {/* Verified Backend Engine Status */}
       <div className="hidden items-center gap-4 md:flex">
         <Stat
           label="DuckDB"
@@ -94,7 +93,7 @@ export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
         />
       </div>
 
-      {/* Search Trigger */}
+      {/* Global ⌘K search trigger */}
       <button
         type="button"
         onClick={onOpenSearch}
@@ -108,14 +107,12 @@ export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
         </kbd>
       </button>
 
-      {/* Simulated Feed Pill */}
       {isMock && (
         <span className="hidden rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-warn lg:inline">
           SIMULATED FEED
         </span>
       )}
 
-      {/* Real-time Clock */}
       <span className="tnum whitespace-nowrap text-muted-foreground">{clock}</span>
     </header>
   )

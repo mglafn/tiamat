@@ -1,6 +1,15 @@
+"""
+src/etl/load_duckdb.py
+----------------------
+High-performance streaming ETL pipeline for MTGJSON v5 datasets into DuckDB.
+Safely extracts retail and buylist price points across finishes (normal, foil, etched)
+and ingests card fundamentals into dimensional store dim_cards.
+"""
+
 import os
 import sys
 from pathlib import Path
+from typing import Generator, Dict, Any
 import duckdb
 import pandas as pd
 
@@ -14,12 +23,14 @@ except ImportError:
     from src.etl.extract_prices import stream_mtg_prices
 
 
-def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
+def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000) -> Generator[pd.DataFrame, None, None]:
     """
-    Flattens deeply nested MTGJSON dictionaries and yields batches of flat dataframes.
-    Extracts both retail and buylist price points across all vendors and finishes.
+    Lazily parses deeply nested MTGJSON price dictionaries with defensive type guards.
+    Extracts paper/mtgo format, vendors, list types (retail/buylist), finishes (normal/foil/etched),
+    and calendar price observations without exceeding memory budgets.
     """
     records_batch = []
+    
     for uuid, price_data in stream_mtg_prices(str(raw_json_path)):
         if not isinstance(price_data, dict):
             continue
@@ -32,15 +43,13 @@ def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
                 if not isinstance(vendor_data, dict):
                     continue
 
-                for list_type in ['retail', 'buylist']:
-                    if list_type not in vendor_data:
-                        continue
-                    
-                    list_data = vendor_data[list_type]
+                for list_type in ("retail", "buylist"):
+                    list_data = vendor_data.get(list_type)
                     if not isinstance(list_data, dict):
                         continue
                     
-                    for finish, date_prices in list_data.items():
+                    for finish in ("normal", "foil", "etched"):
+                        date_prices = list_data.get(finish)
                         if not isinstance(date_prices, dict):
                             continue
                         
@@ -50,14 +59,18 @@ def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
                             except (ValueError, TypeError):
                                 continue
 
+                            # Enforce positive price sanity
+                            if price_float <= 0.0:
+                                continue
+
                             records_batch.append({
-                                'uuid': str(uuid),
-                                'format': str(card_format),
-                                'vendor': str(vendor),
-                                'list_type': str(list_type),
-                                'finish': str(finish),
-                                'price_date': str(date_str),
-                                'price': price_float
+                                "uuid": str(uuid),
+                                "format": str(card_format),
+                                "vendor": str(vendor),
+                                "list_type": str(list_type),
+                                "finish": str(finish),
+                                "price_date": str(date_str),
+                                "price": price_float
                             })
 
                             if len(records_batch) >= batch_size:
@@ -70,21 +83,26 @@ def parse_and_batch_records(raw_json_path: Path, batch_size: int = 50000):
 
 def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     """
-    Infers schema and ingests dim_cards catalog from cards.csv directly into DuckDB.
+    Ingests and enriches the dim_cards dimensional table directly from cards.csv into DuckDB.
+    Normalizes types (Creature, Land, Battle, Planeswalker), Reserved List status, and release dates.
     """
     posix_path = cards_csv_path.as_posix()
-    print(f"Ingesting dimension catalog from {posix_path}...")
+    print(f"Ingesting enriched dimension catalog from {posix_path}...")
     conn.execute("DROP TABLE IF EXISTS dim_cards")
     conn.execute(f"""
         CREATE TABLE dim_cards AS 
         SELECT 
             uuid, 
             name, 
-            COALESCE(setCode, 'OTC') as set_code, 
-            number as collector_number, 
+            COALESCE(setCode, 'OTC') AS set_code, 
+            number AS collector_number, 
             rarity,
-            TRY_CAST(edhrecRank AS INTEGER) as edhrec_rank,
-            COALESCE(TRY_CAST(isOnlineOnly AS BOOLEAN), false) as is_online_only
+            TRY_CAST(edhrecRank AS INTEGER) AS edhrec_rank,
+            COALESCE(TRY_CAST(isOnlineOnly AS BOOLEAN), false) AS is_online_only,
+            COALESCE(TRY_CAST(isReserved AS BOOLEAN), false) AS is_reserved,
+            COALESCE(TRY_CAST(manaValue AS DOUBLE), 0.0) AS mana_value,
+            COALESCE(types, 'Unknown') AS card_type,
+            TRY_CAST(originalReleaseDate AS DATE) AS original_release_date
         FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
@@ -112,7 +130,6 @@ def main():
     conn = duckdb.connect(str(db_path))
 
     try:
-        # 1. Initialize Fact Table with list_type and format support
         conn.execute("DROP TABLE IF EXISTS fact_prices")
         conn.execute("""
             CREATE TABLE fact_prices (
@@ -148,12 +165,10 @@ def main():
 
         print(f"Fact table complete! Total records loaded: {total_rows:,}\n")
 
-        # 2. Add high-performance indexes
         print("Building analytical indexes on fact_prices...")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, vendor, finish, list_type, format);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
 
-        # 3. Ingest Dimension Table
         if cards_csv_path.exists():
             load_dimension_cards(conn, cards_csv_path)
         else:

@@ -21,7 +21,6 @@ export function CommandPalette({
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Reset states when the modal is opened
   useEffect(() => {
     if (open) {
       setQuery("")
@@ -31,7 +30,7 @@ export function CommandPalette({
     }
   }, [open])
 
-  // Debounce keystrokes by 250ms to prevent spamming backend /api/v1/search
+  // Debounce input to limit API calls on rapid typing
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedQuery(query)
@@ -55,7 +54,7 @@ export function CommandPalette({
       onClose()
     } else if (e.key === "ArrowDown") {
       e.preventDefault()
-      setActive((a) => Math.min(a + 1, results.length - 1))
+      setActive((a) => Math.min(a + 1, Math.max(0, results.length - 1)))
     } else if (e.key === "ArrowUp") {
       e.preventDefault()
       setActive((a) => Math.max(a - 1, 0))

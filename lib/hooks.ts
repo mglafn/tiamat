@@ -1,4 +1,7 @@
-// lib/hooks.ts
+/**
+ * SWR hooks wrapping API endpoints with background polling and deduplication.
+ */
+
 "use client"
 
 import useSWR from "swr"
@@ -38,6 +41,8 @@ export function useArbitrage(minSpread: number, finish: string) {
 
   const rawRows: ArbitrageOpportunity[] = data ?? []
   const filtered = rawRows.filter((r: ArbitrageOpportunity) => finish === "all" || r.finish === finish)
+  
+  // Deduplicate composite key (uuid + finish) in case multiple vendors return identical entries
   const seen = new Set<string>()
   const rows: ArbitrageOpportunity[] = []
   

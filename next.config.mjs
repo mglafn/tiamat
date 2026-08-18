@@ -10,7 +10,6 @@ const nextConfig = {
     const apiUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL
     if (!apiUrl) return []
     
-    // Clean trailing slash
     const target = apiUrl.replace(/\/$/, "")
 
     return [
