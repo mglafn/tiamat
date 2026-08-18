@@ -3,64 +3,109 @@ import sys
 from pathlib import Path
 import duckdb
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FULL_DB = BASE_DIR / "data" / "mtg_prices_full.duckdb"
 PROD_DB = BASE_DIR / "data" / "mtg_prices.duckdb"
 
 
-def create_production_snapshot(lookback_days: int = 60):
-    if PROD_DB.exists() and not FULL_DB.exists():
-        print(f"Renaming {PROD_DB.name} -> {FULL_DB.name}")
-        os.rename(PROD_DB, FULL_DB)
-
-    if not FULL_DB.exists():
-        print(f"Source database not found at {FULL_DB}", file=sys.stderr)
+def create_production_snapshot():
+    # Fallback to mtg_prices.duckdb if full doesn't exist
+    src_db = FULL_DB if FULL_DB.exists() else PROD_DB
+    if not src_db.exists():
+        print(f"Source database not found at {src_db}", file=sys.stderr)
         sys.exit(1)
 
-    if PROD_DB.exists():
-        os.remove(PROD_DB)
+    temp_prod = BASE_DIR / "data" / "mtg_prices_pruned.duckdb"
+    if temp_prod.exists():
+        os.remove(temp_prod)
 
-    src_conn = duckdb.connect(str(FULL_DB), read_only=True)
-    dst_conn = duckdb.connect(str(PROD_DB))
+    conn = duckdb.connect(str(temp_prod))
 
     try:
-        dst_conn.execute("CREATE TABLE dim_cards AS SELECT * FROM src_conn.dim_cards")
-        dst_conn.execute("CREATE TABLE fact_arbitrage_opportunities AS SELECT * FROM src_conn.fact_arbitrage_opportunities")
+        conn.execute(f"ATTACH '{src_db.as_posix()}' AS src (READ_ONLY);")
 
-        dst_conn.execute(f"""
-            CREATE TABLE fact_card_features AS 
-            SELECT * FROM src_conn.fact_card_features 
-            WHERE price_date >= (
-                SELECT MAX(price_date) - INTERVAL {lookback_days} DAY 
-                FROM src_conn.fact_card_features
+        # 1. Keep ALL active arbitrage opportunities
+        conn.execute("""
+            CREATE TABLE fact_arbitrage_opportunities AS 
+            SELECT * FROM src.fact_arbitrage_opportunities;
+        """)
+
+        # 2. Target universe: Top 1,000 EDHREC staples + Reserved List + All Arb Cards
+        conn.execute("""
+            CREATE TEMP TABLE target_tracked_cards AS
+            SELECT DISTINCT uuid FROM src.fact_arbitrage_opportunities
+            UNION
+            SELECT uuid FROM src.dim_cards 
+            WHERE (edhrec_rank IS NOT NULL AND edhrec_rank <= 1000) 
+               OR is_reserved = true;
+        """)
+
+        # 3. Features: Last 21 days of history for tracked cards ONLY
+        conn.execute("""
+            CREATE TABLE fact_card_features AS
+            SELECT f.* FROM src.fact_card_features f
+            JOIN target_tracked_cards t ON f.uuid = t.uuid
+            WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 21 DAY FROM src.fact_card_features);
+        """)
+
+        # 4. Enriched Dimension Table (tracked cards only)
+        conn.execute("""
+            CREATE TABLE dim_cards AS 
+            SELECT 
+                d.uuid, d.name, d.set_code, d.collector_number, d.rarity,
+                d.edhrec_rank, d.is_online_only, d.is_reserved, d.mana_value,
+                d.card_type, d.original_release_date
+            FROM src.dim_cards d
+            WHERE d.is_online_only = false
+              AND d.uuid IN (SELECT DISTINCT uuid FROM target_tracked_cards);
+        """)
+
+        # 5. Latest Retail Price points for the summary cards
+        conn.execute("""
+            CREATE TABLE fact_prices AS
+            WITH ranked_prices AS (
+                SELECT 
+                    uuid, format, vendor, list_type, finish, price_date, price,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY uuid, finish, vendor 
+                        ORDER BY price_date DESC
+                    ) AS rn
+                FROM src.fact_prices
+                WHERE format = 'paper' 
+                  AND list_type = 'retail'
+                  AND vendor IN ('tcgplayer', 'cardkingdom', 'starcitygames')
+                  AND uuid IN (SELECT uuid FROM dim_cards)
             )
+            SELECT uuid, format, vendor, list_type, finish, price_date, price
+            FROM ranked_prices
+            WHERE rn = 1;
         """)
 
-        dst_conn.execute(f"""
-            CREATE TABLE fact_prices AS 
-            SELECT * FROM src_conn.fact_prices 
-            WHERE format = 'paper' 
-              AND price_date >= (
-                  SELECT MAX(price_date) - INTERVAL {lookback_days} DAY 
-                  FROM src_conn.fact_prices
-              )
-        """)
+        # 6. Essential analytical indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, finish);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_features_lookup ON fact_card_features(uuid, finish);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
 
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, vendor, finish, list_type, format);")
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_features_uuid_finish_date ON fact_card_features(uuid, finish, price_date);")
-        dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
+        conn.execute("CHECKPOINT;")
+        conn.execute("VACUUM;")
+        conn.execute("DETACH src;")
 
-        dst_conn.execute("CHECKPOINT;")
+        conn.close()
+
+        # Overwrite destination file
+        if PROD_DB.exists():
+            os.remove(PROD_DB)
+        os.rename(temp_prod, PROD_DB)
 
         size_mb = PROD_DB.stat().st_size / (1024 * 1024)
-        print(f"Snapshot created: {PROD_DB} ({size_mb:.2f} MB)")
+        print(f"✅ Production snapshot ready: {PROD_DB} ({size_mb:.2f} MB)")
 
-    finally:
-        src_conn.close()
-        dst_conn.close()
+    except Exception as e:
+        if temp_prod.exists():
+            os.remove(temp_prod)
+        raise e
 
 
 if __name__ == "__main__":
