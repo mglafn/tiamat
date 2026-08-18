@@ -1,12 +1,12 @@
-"use client"
+'use client'
 
-import { useEffect, useMemo, useRef } from "react"
-import { AlertCircle, ArrowUp, Loader2, RefreshCw, Star } from "lucide-react"
-import { useArbitrage, useCatalog } from "@/lib/hooks"
-import { usd, pct, shortUuid } from "@/lib/format"
+import { useEffect, useMemo, useRef } from 'react'
+import { ArrowUp, Star } from 'lucide-react'
+import { useArbitrage, useCatalog } from '@/lib/hooks'
+import { usd, pct, shortUuid } from '@/lib/format'
 
 const SPREAD_OPTIONS = [0, 2.5, 5, 10, 20]
-const FINISH_OPTIONS = ["all", "normal", "foil", "etched"] as const
+const FINISH_OPTIONS = ['all', 'normal', 'foil', 'etched'] as const
 
 interface ArbitrageBookProps {
   minSpread: number
@@ -27,16 +27,22 @@ export function ArbitrageBook({
   selectedFinish,
   onSelect,
 }: ArbitrageBookProps) {
-  const { rows, error, isLoading, isValidating } = useArbitrage(minSpread, finish)
+  const { rows } = useArbitrage(minSpread, finish)
   const catalog = useCatalog()
   const listRef = useRef<HTMLDivElement>(null)
+
+  // Max spread percentage for normalizing the inline green depth bars
+  const maxSpreadPct = useMemo(() => {
+    if (rows.length === 0) return 1
+    return Math.max(1, ...rows.map((r) => r.spread_pct ?? 0))
+  }, [rows])
 
   const selectedIndex = useMemo(
     () => rows.findIndex((r) => r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)),
     [rows, selectedUuid, selectedFinish]
   )
 
-  // Default selection to top spread opportunity on initial load
+  // Default selection to top spread opportunity
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
       onSelect(rows[0].uuid, rows[0].finish)
@@ -47,47 +53,35 @@ export function ArbitrageBook({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
-      if (tag === "INPUT" || tag === "TEXTAREA") return
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
       if (rows.length === 0) return
 
       const key = e.key.toLowerCase()
-      if (key === "j" || key === "k") {
+      if (key === 'j' || key === 'k') {
         e.preventDefault()
         const cur = selectedIndex === -1 ? 0 : selectedIndex
-        const next = key === "j" ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0)
+        const next = key === 'j' ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0)
         onSelect(rows[next].uuid, rows[next].finish)
       }
     }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
   }, [rows, selectedIndex, onSelect])
 
-  // Keep active selection in view during keyboard navigation
+  // Keep active selection in view
   useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-uuid="${selectedUuid}"][data-finish="${selectedFinish}"]`)
-    el?.scrollIntoView({ block: "nearest" })
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-uuid="${selectedUuid}"][data-finish="${selectedFinish}"]`
+    )
+    el?.scrollIntoView({ block: 'nearest' })
   }, [selectedUuid, selectedFinish])
 
   return (
     <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
-      {/* Header & sync state */}
+      {/* Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Arbitrage Order Book</h2>
-        {error ? (
-          <span className="flex items-center gap-1.5 text-[10px] text-down">
-            <AlertCircle className="h-3 w-3" /> BROKEN
-          </span>
-        ) : isLoading && rows.length === 0 ? (
-          <span className="flex items-center gap-1.5 text-[10px] text-accent">
-            <Loader2 className="h-3 w-3 animate-spin" /> FETCHING
-          </span>
-        ) : isValidating ? (
-          <span className="flex items-center gap-1.5 text-[10px] text-accent">
-            <RefreshCw className="h-2.5 w-2.5 animate-spin" /> {rows.length} PAIRS
-          </span>
-        ) : (
-          <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
-        )}
+        <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
       </div>
 
       {/* Filter toolbar */}
@@ -101,7 +95,7 @@ export function ArbitrageBook({
                 type="button"
                 onClick={() => setMinSpread(s)}
                 className={`tnum px-1.5 py-0.5 transition-colors ${
-                  minSpread === s ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-surface-2"
+                  minSpread === s ? 'bg-accent font-semibold text-accent-foreground' : 'text-muted-foreground hover:bg-surface-2'
                 }`}
               >
                 ${s}
@@ -118,7 +112,7 @@ export function ArbitrageBook({
                 type="button"
                 onClick={() => setFinish(f)}
                 className={`px-1.5 py-0.5 transition-colors ${
-                  finish === f ? "bg-accent text-accent-foreground font-semibold" : "text-muted-foreground hover:bg-surface-2"
+                  finish === f ? 'bg-accent font-semibold text-accent-foreground' : 'text-muted-foreground hover:bg-surface-2'
                 }`}
               >
                 {f}
@@ -139,20 +133,8 @@ export function ArbitrageBook({
 
       {/* Rows */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
-        {isLoading && rows.length === 0 && !error && (
-          <div className="space-y-1.5 p-3">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="flex h-6 animate-pulse items-center gap-2 rounded-sm bg-surface-2/60 px-2" />
-            ))}
-          </div>
-        )}
-        {error && rows.length === 0 && (
-          <div className="p-4 text-center text-[11px] text-down">
-            Connection failed. Unable to fetch real-time arbitrage spreads.
-          </div>
-        )}
-        {!isLoading && !error && rows.length === 0 && (
-          <div className="p-4 text-center text-[11px] text-dim leading-relaxed">
+        {rows.length === 0 && (
+          <div className="p-4 text-center text-[11px] leading-relaxed text-dim">
             No cross-vendor spreads matching &gt;= ${minSpread.toFixed(2)}. Adjust the spread hurdle or finish filter.
           </div>
         )}
@@ -163,6 +145,9 @@ export function ArbitrageBook({
           const selected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
           const hot = r.spread_pct >= 25.0
 
+          // Calculate green background depth bar width based on spread percentage
+          const spreadBarPct = Math.min(100, Math.max(3, (r.spread_pct / maxSpreadPct) * 100))
+
           return (
             <button
               key={`${r.uuid}-${r.finish}-${i}`}
@@ -170,22 +155,29 @@ export function ArbitrageBook({
               data-uuid={r.uuid}
               data-finish={r.finish}
               onClick={() => onSelect(r.uuid, r.finish)}
-              className={`grid w-full grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/50 px-3 py-1 text-left text-[11px] transition-colors ${
-                selected ? "bg-accent/15 ring-1 ring-inset ring-accent/50" : "hover:bg-surface-2/60"
+              className={`relative grid w-full grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/50 px-3 py-1 text-left text-[11px] transition-colors ${
+                selected ? 'bg-accent/20 ring-1 ring-inset ring-accent/60' : 'hover:bg-surface-2/60'
               }`}
             >
-              <span className="truncate">
-                <span className={selected ? "text-accent font-medium" : "text-foreground"}>{name}</span>
+              {/* Green spread highlight bar */}
+              <span
+                className="pointer-events-none absolute inset-y-0 left-0 bg-gradient-to-r from-up/25 via-up/10 to-transparent transition-all duration-300"
+                style={{ width: `${spreadBarPct}%` }}
+                aria-hidden
+              />
+
+              <span className="relative truncate">
+                <span className={selected ? 'font-medium text-accent' : 'text-foreground'}>{name}</span>
                 {setCode && <span className="ml-1 text-dim">({setCode})</span>}
-                {r.finish === "foil" && <span className="ml-1.5 text-[9px] font-semibold text-warn">FOIL</span>}
-                {r.finish === "etched" && <span className="ml-1.5 text-[9px] font-semibold text-accent">ETCHED</span>}
+                {r.finish === 'foil' && <span className="ml-1.5 text-[9px] font-semibold text-warn">FOIL</span>}
+                {r.finish === 'etched' && <span className="ml-1.5 text-[9px] font-semibold text-accent">ETCHED</span>}
               </span>
-              <span className="tnum w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
-              <span className="tnum w-14 text-right text-foreground font-medium">{usd(r.ck_price, { compact: true })}</span>
-              <span className={`tnum w-12 text-right ${r.spread_pct >= 0 ? "text-up font-semibold" : "text-down"}`}>
+              <span className="tnum relative w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
+              <span className="tnum relative w-14 text-right font-medium text-foreground">{usd(r.ck_price, { compact: true })}</span>
+              <span className={`tnum relative w-12 text-right ${r.spread_pct >= 0 ? 'font-semibold text-up' : 'text-down'}`}>
                 {pct(r.spread_pct)}
               </span>
-              <span className="flex w-6 justify-center">
+              <span className="relative flex w-6 justify-center">
                 {hot ? (
                   <Star className="h-3 w-3 fill-warn text-warn" aria-label="High-spread opportunity" />
                 ) : (
@@ -198,7 +190,7 @@ export function ArbitrageBook({
       </div>
 
       <div className="border-t border-border-strong bg-surface px-3 py-1 text-[10px] uppercase text-dim">
-        <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> cycle rows · live temporal asof
+        <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> cycle rows · bar = spread divergence · live temporal asof
       </div>
     </section>
   )

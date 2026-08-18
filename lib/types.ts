@@ -1,4 +1,6 @@
 /**
+ * lib/types.ts
+ * ------------
  * Shared data contracts mirroring FastAPI Pydantic response models.
  */
 
@@ -29,6 +31,8 @@ export interface PriceHistoryPoint {
   sma_7?: number | null
   sma_30?: number | null
   daily_return_pct?: number | null
+  /** Traded units observed across tracked marketplaces that day. */
+  volume?: number | null
 }
 
 export interface ArbitrageOpportunity {
@@ -42,6 +46,8 @@ export interface ArbitrageOpportunity {
   ck_price: number
   price_spread: number
   spread_pct: number
+  /** Order-book depth proxy: number of live listings backing the quote. */
+  depth?: number | null
 }
 
 export interface PredictionResponse {

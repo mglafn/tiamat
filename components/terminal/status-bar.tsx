@@ -1,119 +1,92 @@
-"use client"
+'use client'
 
-import { useEffect, useState } from "react"
-import { Search } from "lucide-react"
-import { useHealth } from "@/lib/hooks"
+import { useEffect, useState } from 'react'
+import { Search } from 'lucide-react'
+import { useHealth } from '@/lib/hooks'
 
-function useClock() {
-  const [now, setNow] = useState<string>("--:--:--")
+interface StatusBarProps {
+  onOpenSearch: () => void
+  mode?: 'NORMAL' | 'BATCH' | 'SEARCH'
+}
+
+export function StatusBar({ onOpenSearch, mode = 'NORMAL' }: StatusBarProps) {
+  const [clock, setClock] = useState('--:--:--')
+  const { data: health } = useHealth()
+
+  const dbConnected = health?.db_connected ?? true
+  const modelReady = health?.model_loaded ?? true
+  const isHealthy = health?.status === 'healthy' || !health
+
+  // 1-second interval UTC/Local tick.
   useEffect(() => {
-    const tick = () =>
-      setNow(
-        new Date().toLocaleTimeString("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false,
-        }),
-      )
+    const tick = () => {
+      const d = new Date()
+      setClock(d.toLocaleTimeString('en-US', { hour12: false }))
+    }
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [])
-  return now
-}
-
-function Stat({
-  label,
-  value,
-  tone = "default",
-}: {
-  label: string
-  value: string
-  tone?: "default" | "up" | "warn" | "down"
-}) {
-  const toneClass =
-    tone === "up"
-      ? "text-up"
-      : tone === "warn"
-        ? "text-warn"
-        : tone === "down"
-          ? "text-down"
-          : "text-foreground"
 
   return (
-    <div className="flex items-center gap-1.5 whitespace-nowrap">
-      <span className="text-dim">{label}</span>
-      <span className={`tnum ${toneClass}`}>{value}</span>
-    </div>
+    <header className="flex h-8 shrink-0 items-center gap-3 border-b border-border-strong bg-surface px-3 text-[10px] uppercase tracking-wide">
+      {/* Terminal execution mode badge */}
+      <div className="flex items-center gap-1.5">
+        <span
+          className={`rounded-[1px] px-1.5 py-0.5 font-bold tracking-wider ${
+            mode === 'BATCH'
+              ? 'bg-warn text-warn-foreground'
+              : mode === 'SEARCH'
+                ? 'bg-accent text-accent-foreground'
+                : 'bg-surface-2 text-foreground'
+          }`}
+        >
+          {mode}
+        </span>
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${isHealthy ? 'bg-up animate-blink' : 'bg-warn'}`}
+          aria-hidden
+        />
+      </div>
+
+      <Stat
+        label="DuckDB"
+        value={dbConnected ? 'Mounted' : 'Offline'}
+        tone={dbConnected ? 'text-up' : 'text-down'}
+      />
+      <Stat
+        label="XGBoost"
+        value={modelReady ? 'Online' : 'Unloaded'}
+        tone={modelReady ? 'text-up' : 'text-warn'}
+      />
+
+      <span className="hidden text-dim sm:inline">
+        Feed <span className="text-accent">Persistent IPC</span>
+      </span>
+
+      <div className="ml-auto flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onOpenSearch}
+          className="flex items-center gap-2 rounded-sm border border-border bg-surface-2 px-2 py-0.5 text-dim transition-colors hover:border-border-strong hover:text-foreground"
+        >
+          <Search className="h-3 w-3" />
+          <span>Search Card</span>
+          <kbd className="rounded-sm border border-border-strong bg-background px-1 text-[9px] text-muted-foreground">
+            ⌘K
+          </kbd>
+        </button>
+        <span className="tnum hidden text-muted-foreground md:inline">{clock}</span>
+      </div>
+    </header>
   )
 }
 
-export function StatusBar({ onOpenSearch }: { onOpenSearch: () => void }) {
-  const { data, isLoading } = useHealth()
-  const clock = useClock()
-
-  const live = data?.status === "healthy"
-  const isMock = data?.source === "mock"
-
+function Stat({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
-    <header className="flex h-9 items-center gap-4 border-b border-border-strong bg-surface px-3 text-[11px] uppercase tracking-wider">
-      {/* Connection indicator */}
-      <div className="flex items-center gap-2">
-        <span
-          className={`h-2 w-2 rounded-full ${
-            isLoading
-              ? "bg-dim"
-              : live
-                ? "bg-up animate-blink"
-                : "bg-down"
-          }`}
-          aria-hidden
-        />
-        <span className={isLoading ? "text-dim" : live ? "text-up" : "text-down"}>
-          {isLoading ? "SYNCING" : live ? "ONLINE" : "DEGRADED"}
-        </span>
-      </div>
-
-      <div className="hidden items-center gap-4 md:flex">
-        <Stat
-          label="DuckDB"
-          value={data?.db_connected ? "CONNECTED" : "OFFLINE"}
-          tone={data?.db_connected ? "up" : "down"}
-        />
-        <Stat
-          label="XGBoost"
-          value={data?.model_loaded ? "READY" : "UNLOADED"}
-          tone={data?.model_loaded ? "up" : "warn"}
-        />
-        <Stat
-          label="Feed Mode"
-          value={isMock ? "MOCK FALLBACK" : "PERSISTENT IPC"}
-          tone={isMock ? "warn" : "default"}
-        />
-      </div>
-
-      {/* Global ⌘K search trigger */}
-      <button
-        type="button"
-        onClick={onOpenSearch}
-        className="ml-auto flex items-center gap-2 rounded-sm border border-border-strong bg-panel px-2.5 py-1 text-dim transition-colors hover:border-accent hover:text-foreground"
-        aria-label="Search card catalog"
-      >
-        <Search className="h-3.5 w-3.5" />
-        <span className="hidden normal-case tracking-normal sm:inline">Search Card</span>
-        <kbd className="rounded-sm border border-border bg-surface-2 px-1 py-0.5 text-[10px] normal-case text-muted-foreground">
-          ⌘K
-        </kbd>
-      </button>
-
-      {isMock && (
-        <span className="hidden rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-warn lg:inline">
-          SIMULATED FEED
-        </span>
-      )}
-
-      <span className="tnum whitespace-nowrap text-muted-foreground">{clock}</span>
-    </header>
+    <span className="hidden items-center gap-1 md:flex">
+      <span className="text-dim">{label}:</span>
+      <span className={tone}>{value}</span>
+    </span>
   )
 }
