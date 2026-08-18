@@ -1,37 +1,35 @@
-# Dependencies & environments
+# Dependencies
 node_modules/
 venv/
 .venv/
+env/
 .env
 .env*.local
 
-# Next.js build
+# Build artifacts
 .next/
+dist/
+build/
+*.egg-info/
 
 # Python cache & testing
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
 .coverage
+htmlcov/
 
-# Temporary files & directories
+# Logs & temp files
+*.log
 *.tmp
 *.temp
-.tmp/
-tmp/
-
-# OS & sandbox
 .DS_Store
-.vercel/
-.snowflake/
-.v0-trash/
-__v0_*.js
-__v0_*.ts
-__v0_*.tsx
 
-# Raw ETL feeds & transient files
+# Raw ETL feeds & oversized database dumps
 data/raw/
 *.xz
 AllPrices.json
+cards.csv
 repomix-output.xml
-data/mtg_prices.duckdb
+data/mtg_prices_full.duckdb
