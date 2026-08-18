@@ -1,24 +1,37 @@
-# v0 sandbox internal files
-__v0_runtime_loader.js
-__v0_devtools.tsx
-__v0_jsx-dev-runtime.ts
+# Dependencies & environments
+node_modules/
+venv/
+.venv/
+.env
+.env*.local
+
+# Next.js build
+.next/
+
+# Python cache & testing
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Temporary files & directories
+*.tmp
+*.temp
+.tmp/
+tmp/
+
+# OS & sandbox
+.DS_Store
+.vercel/
 .snowflake/
 .v0-trash/
-.vercel/
+__v0_*.js
+__v0_*.ts
+__v0_*.tsx
 
-# Environment variables
-.env*.local
-.env
-
-# Common ignores
-node_modules
-.next/
-.DS_Store
-*.pyc
-/data
+# Raw ETL feeds & transient files
+data/raw/
+*.xz
+AllPrices.json
 repomix-output.xml
-
-
-*.joblib
-*.joblib
-*.joblib
+data/mtg_prices.duckdb

@@ -1,0 +1,5 @@
+# .dockerignore
+data/raw/
+AllPrices.json
+node_modules/
+.git
