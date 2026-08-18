@@ -65,15 +65,15 @@ export interface CardMarketSummary {
   set_code: string
   collector_number?: string | null
   edhrec_rank?: number | null
-  latest_price_date: string
+  latest_price_date?: string | null
   total_market_variants: number
-  floor_price: number
-  avg_price: number
-  ceiling_price: number
-  primary_vendor: string
-  primary_finish: string
-  predicted_7d_price: number
-  predicted_gain_pct: number
+  floor_price?: number | null
+  avg_price?: number | null
+  ceiling_price?: number | null
+  primary_vendor?: string | null
+  primary_finish?: string | null
+  predicted_7d_price?: number | null
+  predicted_gain_pct?: number | null
 }
 
 export interface CardSearchResult {

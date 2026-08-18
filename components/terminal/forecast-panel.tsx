@@ -30,8 +30,10 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
   const { data: history = [], error: historyError, isLoading: historyLoading } = useHistory(uuid, vendor, finish, 45)
   const { data: summary, error: summaryError, isLoading: summaryLoading } = useSummary(uuid)
   
-  const isLoading = forecastLoading || historyLoading || summaryLoading
-  const isError = forecastError || historyError || summaryError
+  const isChartLoading = historyLoading
+  const isChartError = Boolean(historyError)
+  const isPartialData = Boolean(summaryError || (forecastError && history.length > 0))
+  const isOverallLoading = forecastLoading || historyLoading || summaryLoading
 
   const points = useMemo<DriftPoint[]>(() => {
     if (!uuid || history.length === 0) return []
@@ -116,11 +118,15 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
               Model Acc: <span className="tnum text-foreground font-semibold">{forecast.directional_accuracy_pct}%</span>
             </span>
           )}
-          {isError ? (
+          {isChartError ? (
             <span className="flex items-center gap-1 font-mono text-down">
               FEED OFFLINE
             </span>
-          ) : isLoading ? (
+          ) : isPartialData ? (
+            <span className="flex items-center gap-1 font-mono text-warn">
+              PARTIAL DATA
+            </span>
+          ) : isOverallLoading ? (
             <span className="flex items-center gap-1 font-mono text-accent">
               <Loader2 className="h-3 w-3 animate-spin" /> FETCHING
             </span>
@@ -159,20 +165,26 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
             <span className="text-[11px]">Select an asset from the order book or press ⌘K to search</span>
           </div>
         )}
-        {uuid && isError && (
+        {uuid && isChartError && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
             <span className="font-mono text-[11px] uppercase tracking-wider text-down">Query Error</span>
             <span className="text-[10px] text-dim">Unable to fetch verified time series for this variant</span>
           </div>
         )}
-        {uuid && (isLoading || !geom) && !isError && (
+        {uuid && (isChartLoading || (!geom && !isChartError && history.length > 0)) && (
           <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
             <Loader2 className="h-6 w-6 animate-spin text-accent" />
             <span className="font-mono text-[11px] uppercase tracking-wider text-accent">Loading Historical Observations…</span>
             <span className="text-[10px] text-dim">Syncing DuckDB time series and XGBoost inference targets</span>
           </div>
         )}
-        {uuid && !isLoading && !isError && geom && (
+        {uuid && !isChartLoading && !isChartError && history.length === 0 && (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-center">
+            <span className="font-mono text-[11px] uppercase tracking-wider text-dim">No Historical Trades</span>
+            <span className="text-[10px] text-dim">Zero verified price observations recorded for this finish/vendor variant</span>
+          </div>
+        )}
+        {uuid && !isChartLoading && !isChartError && geom && (
           <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full max-h-full" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Price history and forecast chart">
             {/* Horizontal Gridlines */}
             {geom.yTicks.map((t, i) => (

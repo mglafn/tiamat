@@ -62,11 +62,16 @@ export function TelemetryPanel({ uuid, selectedFinish = "normal", onSelectUuid }
     summary != null &&
     summary.floor_price != null &&
     summary.ceiling_price != null &&
-    summary.ceiling_price > 0
+    summary.avg_price != null &&
+    summary.ceiling_price > 0 &&
+    summary.ceiling_price >= summary.floor_price
 
-  const spreadDiff = (summary?.ceiling_price ?? 0) - (summary?.floor_price ?? 0)
+  const spreadDiff = hasValidPriceRange && summary?.ceiling_price != null && summary?.floor_price != null
+    ? summary.ceiling_price - summary.floor_price
+    : 0
+
   const dist =
-    hasValidPriceRange && summary
+    hasValidPriceRange && summary && summary.floor_price != null && summary.avg_price != null
       ? {
           floorPos: 0,
           avgPos: Math.min(

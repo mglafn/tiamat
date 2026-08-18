@@ -159,7 +159,7 @@ def get_db():
 app = FastAPI(
     title="MTG Financial Arbitrage & Forecasting API",
     description="Serves real-time cross-vendor arbitrage spreads, historical price series, and 7-day XGBoost price forecasts.",
-    version="2.4.1",
+    version="2.4.2",
     lifespan=lifespan
 )
 
@@ -239,15 +239,15 @@ class CardMarketSummary(BaseModel):
     set_code: str = "OTC"
     collector_number: Optional[str] = None
     edhrec_rank: Optional[int] = None
-    latest_price_date: str
-    total_market_variants: int
-    floor_price: float
-    avg_price: float
-    ceiling_price: float
-    primary_vendor: str
-    primary_finish: str
-    predicted_7d_price: float
-    predicted_gain_pct: float
+    latest_price_date: Optional[str] = None
+    total_market_variants: int = 1
+    floor_price: Optional[float] = None
+    avg_price: Optional[float] = None
+    ceiling_price: Optional[float] = None
+    primary_vendor: Optional[str] = None
+    primary_finish: Optional[str] = None
+    predicted_7d_price: Optional[float] = None
+    predicted_gain_pct: Optional[float] = None
 
 
 class CardSearchResult(BaseModel):
@@ -504,19 +504,29 @@ def get_forecast(
 
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
 def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
-    if not model_artifact:
-        raise HTTPException(status_code=503, detail="Forecasting model not loaded.")
-
+    """
+    Returns aggregate market statistics and dimensional metadata for an asset SKU.
+    Gracefully returns partial catalog records with null metrics for illiquid or historical items.
+    """
     card_name, set_code, collector_number, edhrec_rank = "Unknown Asset", "OTC", None, None
+    card_exists = False
+
     try:
         dim_query = "SELECT name, set_code, collector_number, edhrec_rank FROM dim_cards WHERE uuid = ?"
         dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
         if dim_row:
-            card_name, set_code = dim_row[0], dim_row[1]
+            card_exists = True
+            card_name = dim_row[0] or "Unknown Asset"
+            set_code = dim_row[1] or "OTC"
             collector_number = str(dim_row[2]) if dim_row[2] else None
             edhrec_rank = int(dim_row[3]) if dim_row[3] is not None else None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch card metadata: {str(e)}")
+
+    if not card_exists:
+        check_fact = db_conn.cursor().execute("SELECT 1 FROM fact_prices WHERE uuid = ? LIMIT 1", [card_uuid]).fetchone()
+        if not check_fact:
+            raise HTTPException(status_code=404, detail=f"Asset UUID '{card_uuid}' not found in catalog or price records.")
 
     variant_count = 1
     try:
@@ -533,10 +543,8 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
 
     finish_query = "SELECT finish FROM fact_card_features WHERE uuid = ? ORDER BY price_date DESC LIMIT 1"
     target_finish_row = db_conn.cursor().execute(finish_query, [card_uuid]).fetchone()
-    if not target_finish_row:
-        raise HTTPException(status_code=404, detail=f"No pricing records found for card UUID: {card_uuid}")
+    primary_target_finish = target_finish_row[0] if target_finish_row else "normal"
 
-    primary_target_finish = target_finish_row[0]
     agg_query = """
         WITH latest_vendor_prices AS (
             SELECT vendor, price as current_price, price_date FROM fact_prices
@@ -547,59 +555,75 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
         FROM latest_vendor_prices
     """
     agg_row = db_conn.cursor().execute(agg_query, [card_uuid, primary_target_finish]).fetchone()
-    if not agg_row or agg_row[0] is None:
-        raise HTTPException(status_code=404, detail=f"Pricing not found for card UUID: {card_uuid}")
-    floor_price, avg_price, ceiling_price, latest_date = agg_row
+    
+    floor_price = round(float(agg_row[0]), 2) if agg_row and agg_row[0] is not None else None
+    avg_price = round(float(agg_row[1]), 2) if agg_row and agg_row[1] is not None else None
+    ceiling_price = round(float(agg_row[2]), 2) if agg_row and agg_row[2] is not None else None
+    latest_date = str(agg_row[3]) if agg_row and agg_row[3] is not None else None
 
-    raw_cols = model_artifact.get("feature_cols", list(ALLOWED_FEATURE_COLS))
-    feature_cols = [c for c in raw_cols if c in ALLOWED_FEATURE_COLS]
-    cols_sql = ", ".join(feature_cols)
+    vendor = "consensus"
+    if avg_price is not None:
+        vendor_query = """
+            WITH latest_vendor_prices AS (
+                SELECT vendor, price as current_price FROM fact_prices
+                WHERE uuid = ? AND finish = ? AND format = 'paper' AND list_type = 'retail'
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY vendor ORDER BY price_date DESC) = 1
+            )
+            SELECT vendor FROM latest_vendor_prices ORDER BY ABS(current_price - ?) ASC LIMIT 1
+        """
+        v_row = db_conn.cursor().execute(vendor_query, [card_uuid, primary_target_finish, avg_price]).fetchone()
+        if v_row:
+            vendor = v_row[0]
 
-    feature_query = f"""
-        SELECT current_price, {cols_sql} FROM fact_card_features
-        WHERE uuid = ? AND finish = ?
-        ORDER BY price_date DESC LIMIT 1
-    """
-    f_row = db_conn.cursor().execute(feature_query, [card_uuid, primary_target_finish]).fetchone()
-    if not f_row:
-        raise HTTPException(status_code=404, detail=f"Variant features not found for card UUID: {card_uuid}")
+    pred_price = None
+    pred_return_pct = None
 
-    current_price, feature_vals = float(f_row[0]), f_row[1:]
+    if model_artifact:
+        raw_cols = model_artifact.get("feature_cols", list(ALLOWED_FEATURE_COLS))
+        feature_cols = [c for c in raw_cols if c in ALLOWED_FEATURE_COLS]
+        cols_sql = ", ".join(feature_cols)
 
-    vendor_query = """
-        WITH latest_vendor_prices AS (
-            SELECT vendor, price as current_price FROM fact_prices
-            WHERE uuid = ? AND finish = ? AND format = 'paper' AND list_type = 'retail'
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY vendor ORDER BY price_date DESC) = 1
-        )
-        SELECT vendor FROM latest_vendor_prices ORDER BY ABS(current_price - ?) ASC LIMIT 1
-    """
-    v_row = db_conn.cursor().execute(vendor_query, [card_uuid, primary_target_finish, avg_price]).fetchone()
-    vendor = v_row[0] if v_row else "consensus"
-    finish = primary_target_finish
+        feature_query = f"""
+            SELECT current_price, {cols_sql} FROM fact_card_features
+            WHERE uuid = ? AND finish = ?
+            ORDER BY price_date DESC LIMIT 1
+        """
+        f_row = db_conn.cursor().execute(feature_query, [card_uuid, primary_target_finish]).fetchone()
+        if f_row and f_row[0] is not None:
+            current_price, feature_vals = float(f_row[0]), f_row[1:]
+            input_df = sanitize_features_for_inference(feature_cols, feature_vals)
 
-    input_df = sanitize_features_for_inference(feature_cols, feature_vals)
+            metrics = model_artifact.get("metrics", {})
+            classifier = model_artifact.get("classifier")
+            regressor = model_artifact.get("regressor")
 
-    metrics = model_artifact.get("metrics", {})
-    classifier = model_artifact.get("classifier")
-    regressor = model_artifact.get("regressor")
+            if classifier and regressor:
+                prob_threshold = metrics.get("prob_threshold", 0.5)
+                move_prob = float(classifier.predict_proba(input_df)[0][1])
+                pred_return_pct = float(regressor.predict(input_df)[0]) if move_prob >= prob_threshold else 0.0
+            elif "model" in model_artifact:
+                model = model_artifact["model"]
+                pred_return_pct = float(model.predict(input_df)[0])
 
-    if classifier and regressor:
-        prob_threshold = metrics.get("prob_threshold", 0.5)
-        move_prob = float(classifier.predict_proba(input_df)[0][1])
-        pred_return_pct = float(regressor.predict(input_df)[0]) if move_prob >= prob_threshold else 0.0
-    else:
-        model = model_artifact["model"]
-        pred_return_pct = float(model.predict(input_df)[0])
-
-    pred_price = max(0.01, round(current_price * (1.0 + (pred_return_pct / 100.0)), 2))
+            if pred_return_pct is not None:
+                pred_price = max(0.01, round(current_price * (1.0 + (pred_return_pct / 100.0)), 2))
+                pred_return_pct = round(pred_return_pct, 2)
 
     return CardMarketSummary(
-        uuid=card_uuid, name=card_name, set_code=set_code, collector_number=collector_number,
-        edhrec_rank=edhrec_rank, latest_price_date=str(latest_date), total_market_variants=variant_count,
-        floor_price=round(float(floor_price), 2), avg_price=round(float(avg_price), 2),
-        ceiling_price=round(float(ceiling_price), 2), primary_vendor=str(vendor),
-        primary_finish=str(finish), predicted_7d_price=pred_price, predicted_gain_pct=round(pred_return_pct, 2)
+        uuid=card_uuid,
+        name=card_name,
+        set_code=set_code,
+        collector_number=collector_number,
+        edhrec_rank=edhrec_rank,
+        latest_price_date=latest_date,
+        total_market_variants=variant_count,
+        floor_price=floor_price,
+        avg_price=avg_price,
+        ceiling_price=ceiling_price,
+        primary_vendor=str(vendor),
+        primary_finish=str(primary_target_finish),
+        predicted_7d_price=pred_price,
+        predicted_gain_pct=pred_return_pct
     )
 
 
