@@ -1,7 +1,8 @@
+// components/terminal/arbitrage-book.tsx
 'use client'
 
 import { useEffect, useMemo, useRef } from 'react'
-import { ArrowUp, CheckSquare, Download, Layers, Sparkles, Square, Star } from 'lucide-react'
+import { ArrowUp, Download, Layers, Sparkles, Star } from 'lucide-react'
 import { useArbitrage, useCatalog } from '@/lib/hooks'
 import { usd, pct, shortUuid } from '@/lib/format'
 
@@ -72,7 +73,7 @@ export function ArbitrageBook({
     }
   }, [rows, selectedUuid, onSelect])
 
-  // Vim keyboard navigation (J/K cycle, Space stage, Enter trigger)
+  // Vim keyboard navigation (J/K cycle, Space stage/arm, Enter trigger)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -128,7 +129,7 @@ export function ArbitrageBook({
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `buylist_manifest_${new Date().toISOString().split('T')[0]}.csv`
+    a.download = `execution_blotter_${new Date().toISOString().split('T')[0]}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -188,10 +189,10 @@ export function ArbitrageBook({
 
       {/* Column Headers */}
       <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-2 border-b border-border bg-surface/30 px-3 py-1 text-[10px] uppercase text-dim">
-        <span className="w-3 text-center">ST</span>
+        <span className="w-7 text-center">ORD</span>
         <span>SKU / Asset</span>
-        <span className="w-14 text-right">TCG</span>
-        <span className="w-14 text-right">CK</span>
+        <span className="w-14 text-right">ASK (TCG)</span>
+        <span className="w-14 text-right">BID (CK)</span>
         <span className="w-12 text-right">SPR%</span>
         <span className="w-4 text-center">★</span>
       </div>
@@ -232,19 +233,20 @@ export function ArbitrageBook({
                 aria-hidden
               />
 
-              {/* Checkbox Staging Toggle */}
+              {/* EMS-Style Order Arming Micro-Toggle */}
               <span
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggleStage(r.uuid)
                 }}
-                className={`relative z-10 flex h-3 w-3 items-center justify-center rounded-[1px] border transition-colors ${
+                title={isStaged ? "Disarm Order" : "Arm Order for Execution"}
+                className={`relative z-10 flex h-3.5 w-7 items-center justify-center rounded-[2px] font-mono text-[8px] font-bold uppercase tracking-wider transition-all select-none cursor-pointer ${
                   isStaged
-                    ? 'border-accent bg-accent text-accent-foreground'
-                    : 'border-border-strong bg-surface hover:border-dim'
+                    ? 'border border-accent bg-accent text-accent-foreground shadow-[0_0_6px_rgba(74,222,128,0.3)]'
+                    : 'border border-border-strong bg-surface/80 text-dim hover:border-accent/60 hover:text-accent'
                 }`}
               >
-                {isStaged && <span className="text-[9px] font-bold leading-none">✓</span>}
+                {isStaged ? 'ARM' : '+'}
               </span>
 
               <span className="relative truncate">
@@ -276,7 +278,7 @@ export function ArbitrageBook({
           <div className="mb-1.5 flex items-center justify-between text-[10px] font-mono">
             <span className="flex items-center gap-1.5 font-semibold uppercase text-accent">
               <Sparkles className="h-3 w-3" />
-              <span>[{stagedCount}] Staged Order Manifest</span>
+              <span>[{stagedCount}] Staged Execution Blotter</span>
             </span>
             <span className="text-dim">
               Blended ROI: <span className={`font-bold ${blendedROI >= 10 ? 'text-up' : 'text-warn'}`}>{pct(blendedROI)}</span>
@@ -284,9 +286,9 @@ export function ArbitrageBook({
           </div>
           <div className="flex items-center justify-between font-mono text-[10px]">
             <div className="flex items-center gap-2 text-dim">
-              <span>Basis: <strong className="text-foreground">{usd(stagedBasis, { compact: true })}</strong></span>
+              <span>Landed Basis: <strong className="text-foreground">{usd(stagedBasis, { compact: true })}</strong></span>
               <span>·</span>
-              <span>Exp. Payout: <strong className="text-foreground">{usd(stagedExpectedPayout, { compact: true })}</strong></span>
+              <span>Exp. Liquidation: <strong className="text-foreground">{usd(stagedExpectedPayout, { compact: true })}</strong></span>
             </div>
             <button
               type="button"
@@ -305,7 +307,7 @@ export function ArbitrageBook({
         <div className="flex h-7 shrink-0 items-center justify-between border-t border-border-strong bg-surface px-3 text-[9.5px] uppercase text-dim">
           <span>
             <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> Select ·{' '}
-            <kbd className="text-muted-foreground">SPC</kbd> Stage Batch
+            <kbd className="text-muted-foreground">SPC</kbd> Arm Order
           </span>
           <span className="font-mono">Direct/SYP Active</span>
         </div>
