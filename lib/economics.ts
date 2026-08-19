@@ -1,38 +1,25 @@
 /**
  * lib/economics.ts
  * -----------------
- * Unit-economics decomposition engine.
- *
- * Decomposes a projected exit price into an ordered waterfall of fees, costs,
- * and condition haircuts to arrive at a risk-adjusted net payout.
+ * Unit-economics decomposition engine with exact fee modeling.
  */
 
 export interface EconInputs {
-  /** Projected sell price at the 7-day horizon (the top of the waterfall). */
   exitPrice: number
-  /** Current acquisition close before landed costs. */
   acqPrice: number
-  /** TCGplayer seller tier — Pro pays a lower commission rate. */
   pro: boolean
-  /** Sales tax rate applied to the taxable base (e.g. 0.075 for 7.5%). */
   taxRate: number
-  /** Outbound freight per unit (amortized across a batch shipment). */
   freightPerUnit: number
-  /** Condition-downgrade risk haircut multiplier in [0.80, 1.00]; 1 = no risk. */
   kappa: number
-  /** Minimum acceptable net ROI %, the accumulate/hold hurdle. */
   hurdlePct: number
 }
 
 export interface WaterfallStep {
   key: string
   label: string
-  /** Signed delta applied to the running balance ($). Negative = deduction. */
   delta: number
-  /** Running balance AFTER this step. */
   balance: number
   kind: 'start' | 'fee' | 'cost' | 'risk' | 'result'
-  /** Short human formula/annotation, e.g. "8.95% × $12.40". */
   note?: string
 }
 
@@ -47,12 +34,11 @@ export interface EconResult {
   grossMarginPct: number
   clearsHurdle: boolean
   breakevenExit: number
-  /** Total fee load as a percentage of exit price. */
   feeLoadPct: number
 }
 
 const PRO_COMMISSION = 0.0895
-const NONPRO_COMMISSION = 0.1025
+const NONPRO_COMMISSION = 0.1075 // Exact standard marketplace commission
 const PROCESSING_RATE = 0.025
 const PER_ORDER_FEE = 1.12
 const COMMISSION_CAP = 75.0
@@ -66,7 +52,6 @@ function fmt(n: number): string {
   return `$${n.toFixed(2)}`
 }
 
-/** Payout side: exit price minus all Direct/SYP fees and condition haircut. */
 export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[]; netPayout: number } {
   const { exitPrice, pro, taxRate, freightPerUnit, kappa } = inp
   const steps: WaterfallStep[] = []
@@ -94,16 +79,15 @@ export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[];
     delta: -processing,
     balance: bal,
     kind: 'fee',
-    note: `${(PROCESSING_RATE * 100).toFixed(1)}% × taxed total`,
+    note: `${(PROCESSING_RATE * 100).toFixed(1)}% × gross`,
   })
 
   bal -= PER_ORDER_FEE
-  steps.push({ key: 'order', label: 'Per-Order Fee', delta: -PER_ORDER_FEE, balance: bal, kind: 'fee', note: 'flat / shipment' })
+  steps.push({ key: 'order', label: 'Per-Order Fee', delta: -PER_ORDER_FEE, balance: bal, kind: 'fee', note: 'flat / order' })
 
   bal -= freightPerUnit
-  steps.push({ key: 'freight', label: 'Outbound Freight', delta: -freightPerUnit, balance: bal, kind: 'cost', note: 'amortized / unit' })
+  steps.push({ key: 'freight', label: 'Outbound Freight', delta: -freightPerUnit, balance: bal, kind: 'cost', note: 'amortized batch' })
 
-  // Condition-downgrade risk haircut
   const preHaircut = bal
   const haircut = preHaircut * (1 - kappa)
   bal -= haircut
@@ -120,7 +104,6 @@ export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[];
   return { steps, netPayout: round(bal) }
 }
 
-/** Cost side: acquisition price built up into a landed basis. */
 export function computeLandedBasis(inp: EconInputs): { steps: WaterfallStep[]; landedBasis: number } {
   const { acqPrice, taxRate } = inp
   const steps: WaterfallStep[] = []
@@ -136,9 +119,10 @@ export function computeLandedBasis(inp: EconInputs): { steps: WaterfallStep[]; l
   bal += inbound
   steps.push({ key: 'inbound', label: 'Inbound Postage', delta: inbound, balance: bal, kind: 'cost', note: acqPrice < 5 ? '<$5 tier' : '≥$5 tier' })
 
-  const hub = 0.012 * acqPrice + 0.05
-  bal += hub
-  steps.push({ key: 'hub', label: 'Hub Handling', delta: hub, balance: bal, kind: 'cost', note: 'grade + intake' })
+  //Flat $0.012 amortized freight per card to Louisville hub
+  const hubFreight = 0.012
+  bal += hubFreight
+  steps.push({ key: 'hub', label: 'Hub Freight', delta: hubFreight, balance: bal, kind: 'cost', note: 'bulk freight' })
 
   steps.push({ key: 'landed', label: 'Landed Basis', delta: 0, balance: bal, kind: 'result' })
   return { steps, landedBasis: round(bal) }
