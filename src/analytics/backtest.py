@@ -1,5 +1,5 @@
 """
-Out-of-time backtesting engine for TCGplayer Direct / SYP arbitrage strategies.
+Out-of-time backtesting suite for TCGplayer Direct / SYP arbitrage strategies.
 
 Simulates execution across held-out historical partitions against our two-stage
 XGBoost model. Accounts for real marketplace friction:
@@ -235,7 +235,7 @@ def run_arbitrage_backtest(min_net_roi_pct: float = 10.0, db_path: Path = DB_PAT
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run out-of-time backtest on Direct/SYP arbitrage")
+    parser = argparse.ArgumentParser(description="Run out-of-time backtest on Direct/SYP spread strategies.")
     parser.add_argument("--hurdle", type=float, default=10.0, help="Minimum expected net ROI %% hurdle (default: 10.0)")
     args = parser.parse_args()
 

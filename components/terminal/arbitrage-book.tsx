@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { ArrowUp, Download, Star } from 'lucide-react'
 import { useArbitrage, useCatalog } from '@/lib/hooks'
 import { usd, pct, shortUuid } from '@/lib/format'
@@ -45,13 +45,20 @@ export function ArbitrageBook({
     [rows, selectedUuid, selectedFinish]
   )
 
+  const stagedCount = stagedUuids.size
+  const stagedRows = useMemo(() => rows.filter((r) => stagedUuids.has(r.uuid)), [rows, stagedUuids])
+  const stagedBasis = useMemo(
+    () => stagedRows.reduce((acc, r) => acc + (r.tcg_price || 0), 0),
+    [stagedRows]
+  )
+
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
       onSelect(rows[0].uuid, rows[0].finish)
     }
   }, [rows, selectedUuid, onSelect])
 
-  // Vim-style J/K + Spacebar staging
+  // Vim-style J/K cycle + Spacebar staging
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -87,19 +94,20 @@ export function ArbitrageBook({
 
   const handleExportCSV = () => {
     if (stagedUuids.size === 0) return
-    const stagedRows = rows.filter((r) => stagedUuids.has(r.uuid))
     const headers = ['UUID', 'Name', 'Set', 'Finish', 'TCG_Price', 'CK_Buylist', 'Spread_USD', 'Spread_Pct']
-    const csvLines = stagedRows.map((r) => [
-      r.uuid,
-      `"${r.name || 'Unknown'}"`,
-      r.set_code || 'OTC',
-      r.finish,
-      r.tcg_price,
-      r.ck_price,
-      r.price_spread,
-      r.spread_pct,
-    ].join(','))
-    
+    const csvLines = stagedRows.map((r) =>
+      [
+        r.uuid,
+        `"${r.name || 'Unknown'}"`,
+        r.set_code || 'OTC',
+        r.finish,
+        r.tcg_price,
+        r.ck_price,
+        r.price_spread,
+        r.spread_pct,
+      ].join(',')
+    )
+
     const blob = new Blob([[headers.join(','), ...csvLines].join('\n')], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -110,9 +118,9 @@ export function ArbitrageBook({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Arbitrage order book">
+    <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Market spread order book">
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
-        <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Arbitrage Order Book</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Market Spread Book</h2>
         <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
       </div>
 
@@ -175,7 +183,7 @@ export function ArbitrageBook({
           const selected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
           const isStaged = stagedUuids.has(r.uuid)
           const hot = r.spread_pct >= 25.0
-          const spreadBarPct = Math.min(100, Math.max(3, (r.spread_pct / maxSpreadPct) * 100))
+          const spreadBarPct = Math.min(100, Math.max(2, (r.spread_pct / maxSpreadPct) * 100))
 
           return (
             <button
@@ -184,27 +192,30 @@ export function ArbitrageBook({
               data-uuid={r.uuid}
               data-finish={r.finish}
               onClick={() => onSelect(r.uuid, r.finish)}
-              className={`relative grid w-full grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/50 px-3 py-1 text-left text-[11px] transition-colors ${
-                selected ? 'bg-accent/20 ring-1 ring-inset ring-accent/60' : 'hover:bg-surface-2/60'
+              className={`relative grid w-full grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/40 px-3 py-1 text-left text-[11px] transition-colors ${
+                selected ? 'bg-accent/15 ring-1 ring-inset ring-accent/40' : 'hover:bg-surface-2/60'
               }`}
             >
+              {/* Softened Flat Tint Depth Bar */}
               <span
-                className="pointer-events-none absolute inset-y-0 left-0 bg-linear-to-r from-up/25 via-up/10 to-transparent transition-all duration-300"
+                className="pointer-events-none absolute inset-y-0 left-0 bg-up/[0.03] border-r border-up/20 transition-all duration-200"
                 style={{ width: `${spreadBarPct}%` }}
                 aria-hidden
               />
 
-              {/* Checkbox indicator for batch staging */}
+              {/* Staging Checkbox Indicator */}
               <span
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggleStage(r.uuid)
                 }}
-                className={`relative z-10 flex h-3 w-3 items-center justify-center rounded-[1px] border transition-colors ${
-                  isStaged ? 'border-accent bg-accent text-accent-foreground' : 'border-dim bg-surface'
+                className={`relative z-10 flex h-2.5 w-2.5 items-center justify-center rounded-[1px] border transition-colors ${
+                  isStaged
+                    ? 'border-accent bg-accent text-accent-foreground'
+                    : 'border-border-strong bg-surface hover:border-dim'
                 }`}
               >
-                {isStaged && <span className="text-[9px] font-bold leading-none">✓</span>}
+                {isStaged && <span className="text-[8px] font-bold leading-none">✓</span>}
               </span>
 
               <span className="relative truncate">
@@ -230,18 +241,29 @@ export function ArbitrageBook({
         })}
       </div>
 
-      {/* Footer toolbar with batch exporter */}
-      <div className="flex items-center justify-between border-t border-border-strong bg-surface px-3 py-1.5 text-[10px] uppercase text-dim">
-        <span><kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> nav · <kbd className="text-muted-foreground">SPC</kbd> stage</span>
-        {stagedUuids.size > 0 && (
-          <button
-            type="button"
-            onClick={handleExportCSV}
-            className="flex items-center gap-1 rounded-[1px] border border-accent/40 bg-accent/15 px-2 py-0.5 font-semibold text-accent transition-colors hover:bg-accent/25"
-          >
-            <Download className="h-2.5 w-2.5" />
-            <span>Export Manifest ({stagedUuids.size})</span>
-          </button>
+      {/* Execution Blotter Footer */}
+      <div className="flex h-8 shrink-0 items-center justify-between border-t border-border-strong bg-surface px-3 text-[10px] uppercase text-dim">
+        {stagedCount === 0 ? (
+          <span>
+            <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> Cycle ·{' '}
+            <kbd className="text-muted-foreground">SPC</kbd> Stage Allocation
+          </span>
+        ) : (
+          <div className="flex w-full items-center justify-between">
+            <span className="flex items-center gap-1.5 text-foreground font-mono text-[10px]">
+              <span className="font-semibold text-accent">{stagedCount}</span> Allocated
+              <span className="text-border-strong">|</span>
+              <span className="text-dim">Basis:</span> {usd(stagedBasis, { compact: true })}
+            </span>
+            <button
+              type="button"
+              onClick={handleExportCSV}
+              className="flex items-center gap-1 rounded-sm border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[9px] font-semibold text-accent transition-colors hover:bg-accent/25"
+            >
+              <Download className="h-2.5 w-2.5" />
+              <span>Generate Manifest (CSV)</span>
+            </button>
+          </div>
         )}
       </div>
     </section>

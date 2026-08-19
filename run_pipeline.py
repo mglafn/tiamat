@@ -1,5 +1,5 @@
 """
-CLI runner for the MTG financial arbitrage and forecasting pipeline.
+CLI runner for the secondary market pricing ETL and forecasting pipeline.
 
 Executes and verifies sequential stages:
   - Step A: Download & decompress MTGJSON feeds (download_raw.py)
@@ -182,7 +182,7 @@ def execute_script(script_path: Path, extra_args: list = None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified pipeline runner for MTG pricing & ML forecast engine")
+    parser = argparse.ArgumentParser(description="Unified pipeline runner for secondary pricing ETL and forecasting pipeline")
     parser.add_argument("--force", "-f", action="store_true", help="Force re-run of all pipeline stages")
     parser.add_argument("--analytics-only", "-a", action="store_true", help="Skip raw ETL; run feature build and model training")
     parser.add_argument("--build-only", action="store_true", help="Only run SQL feature engineering")

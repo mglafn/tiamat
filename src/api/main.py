@@ -157,8 +157,8 @@ def get_db():
 
 
 app = FastAPI(
-    title="MTG Financial Arbitrage & Forecasting API",
-    description="Serves real-time cross-vendor arbitrage spreads, historical price series, and 7-day XGBoost price forecasts.",
+    title="Secondary Market Price Forecasting & Spread Analytics API",
+    description="Serves real-time multi-vendor price spreads, historical time-series analytics, and 7-day XGBoost price forecasts.",
     version="2.4.2",
     lifespan=lifespan
 )

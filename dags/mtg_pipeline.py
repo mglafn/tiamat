@@ -19,9 +19,9 @@ default_args = {
 }
 
 with DAG(
-    'mtg_arbitrage_etl_pipeline',
+    'secondary_pricing_etl_pipeline',
     default_args=default_args,
-    description='Daily MTG pricing ETL, feature engineering, and XGBoost training pipeline',
+    description='Daily market pricing ETL, feature engineering, and XGBoost training pipeline',
     schedule_interval='@daily',
     catchup=False,
 ) as dag:
