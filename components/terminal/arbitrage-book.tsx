@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef } from 'react'
-import { ArrowUp, Download, Star } from 'lucide-react'
+import { ArrowUp, CheckSquare, Download, Layers, Sparkles, Square, Star } from 'lucide-react'
 import { useArbitrage, useCatalog } from '@/lib/hooks'
 import { usd, pct, shortUuid } from '@/lib/format'
 
@@ -41,16 +41,30 @@ export function ArbitrageBook({
   }, [rows])
 
   const selectedIndex = useMemo(
-    () => rows.findIndex((r) => r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)),
+    () =>
+      rows.findIndex(
+        (r) => r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
+      ),
     [rows, selectedUuid, selectedFinish]
   )
 
   const stagedCount = stagedUuids.size
   const stagedRows = useMemo(() => rows.filter((r) => stagedUuids.has(r.uuid)), [rows, stagedUuids])
+
   const stagedBasis = useMemo(
     () => stagedRows.reduce((acc, r) => acc + (r.tcg_price || 0), 0),
     [stagedRows]
   )
+
+  const stagedExpectedPayout = useMemo(
+    () => stagedRows.reduce((acc, r) => acc + (r.ck_price || 0) * 1.3, 0),
+    [stagedRows]
+  )
+
+  const blendedROI = useMemo(() => {
+    if (stagedBasis <= 0) return 0
+    return ((stagedExpectedPayout - stagedBasis) / stagedBasis) * 100
+  }, [stagedBasis, stagedExpectedPayout])
 
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
@@ -58,7 +72,7 @@ export function ArbitrageBook({
     }
   }, [rows, selectedUuid, onSelect])
 
-  // Vim-style J/K cycle + Spacebar staging
+  // Vim keyboard navigation (J/K cycle, Space stage, Enter trigger)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
@@ -108,7 +122,9 @@ export function ArbitrageBook({
       ].join(',')
     )
 
-    const blob = new Blob([[headers.join(','), ...csvLines].join('\n')], { type: 'text/csv;charset=utf-8;' })
+    const blob = new Blob([[headers.join(','), ...csvLines].join('\n')], {
+      type: 'text/csv;charset=utf-8;',
+    })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -118,12 +134,17 @@ export function ArbitrageBook({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Market spread order book">
+    <section className="relative flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Market spread order book">
+      {/* Book Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
-        <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Market Spread Book</h2>
-        <span className="tnum text-[10px] text-dim">{rows.length} PAIRS</span>
+        <div className="flex items-center gap-2">
+          <Layers className="h-3.5 w-3.5 text-accent" />
+          <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Market Spread Book</h2>
+        </div>
+        <span className="tnum font-mono text-[10px] text-dim">{rows.length} PAIRS</span>
       </div>
 
+      {/* Filter Bars */}
       <div className="flex flex-wrap items-center gap-3 border-b border-border bg-surface/50 px-3 py-1.5 text-[10px] uppercase">
         <div className="flex items-center gap-1.5">
           <span className="text-dim">Min Spread</span>
@@ -134,7 +155,9 @@ export function ArbitrageBook({
                 type="button"
                 onClick={() => setMinSpread(s)}
                 className={`tnum px-1.5 py-0.5 transition-colors ${
-                  minSpread === s ? 'bg-accent font-semibold text-accent-foreground' : 'text-muted-foreground hover:bg-surface-2'
+                  minSpread === s
+                    ? 'bg-accent font-semibold text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
                 }`}
               >
                 ${s}
@@ -151,7 +174,9 @@ export function ArbitrageBook({
                 type="button"
                 onClick={() => setFinish(f)}
                 className={`px-1.5 py-0.5 transition-colors ${
-                  finish === f ? 'bg-accent font-semibold text-accent-foreground' : 'text-muted-foreground hover:bg-surface-2'
+                  finish === f
+                    ? 'bg-accent font-semibold text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-surface-2'
                 }`}
               >
                 {f}
@@ -161,8 +186,9 @@ export function ArbitrageBook({
         </div>
       </div>
 
+      {/* Column Headers */}
       <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-2 border-b border-border bg-surface/30 px-3 py-1 text-[10px] uppercase text-dim">
-        <span className="w-3">ST</span>
+        <span className="w-3 text-center">ST</span>
         <span>SKU / Asset</span>
         <span className="w-14 text-right">TCG</span>
         <span className="w-14 text-right">CK</span>
@@ -170,6 +196,7 @@ export function ArbitrageBook({
         <span className="w-4 text-center">★</span>
       </div>
 
+      {/* Virtualized/Scrollable Pair List */}
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
         {rows.length === 0 && (
           <div className="p-4 text-center text-[11px] leading-relaxed text-dim">
@@ -192,37 +219,39 @@ export function ArbitrageBook({
               data-uuid={r.uuid}
               data-finish={r.finish}
               onClick={() => onSelect(r.uuid, r.finish)}
-              className={`relative grid w-full grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/40 px-3 py-1 text-left text-[11px] transition-colors ${
-                selected ? 'bg-accent/15 ring-1 ring-inset ring-accent/40' : 'hover:bg-surface-2/60'
+              className={`relative grid w-full grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-2 border-b border-border/40 px-3 py-1 text-left font-mono text-[11px] transition-colors ${
+                selected
+                  ? 'bg-accent/15 ring-1 ring-inset ring-accent/50'
+                  : 'hover:bg-surface-2/70'
               }`}
             >
-              {/* Softened Flat Tint Depth Bar */}
+              {/* Proportional Depth Bar Tint */}
               <span
-                className="pointer-events-none absolute inset-y-0 left-0 bg-up/[0.03] border-r border-up/20 transition-all duration-200"
+                className="pointer-events-none absolute inset-y-0 left-0 bg-up/4 border-r border-up/25 transition-all duration-200"
                 style={{ width: `${spreadBarPct}%` }}
                 aria-hidden
               />
 
-              {/* Staging Checkbox Indicator */}
+              {/* Checkbox Staging Toggle */}
               <span
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggleStage(r.uuid)
                 }}
-                className={`relative z-10 flex h-2.5 w-2.5 items-center justify-center rounded-[1px] border transition-colors ${
+                className={`relative z-10 flex h-3 w-3 items-center justify-center rounded-[1px] border transition-colors ${
                   isStaged
                     ? 'border-accent bg-accent text-accent-foreground'
                     : 'border-border-strong bg-surface hover:border-dim'
                 }`}
               >
-                {isStaged && <span className="text-[8px] font-bold leading-none">✓</span>}
+                {isStaged && <span className="text-[9px] font-bold leading-none">✓</span>}
               </span>
 
               <span className="relative truncate">
-                <span className={selected ? 'font-medium text-accent' : 'text-foreground'}>{name}</span>
+                <span className={selected ? 'font-semibold text-accent' : 'text-foreground'}>{name}</span>
                 {setCode && <span className="ml-1 text-dim">({setCode})</span>}
-                {r.finish === 'foil' && <span className="ml-1.5 text-[9px] font-semibold text-warn">FOIL</span>}
-                {r.finish === 'etched' && <span className="ml-1.5 text-[9px] font-semibold text-accent">ETCHED</span>}
+                {r.finish === 'foil' && <span className="ml-1.5 rounded bg-warn/15 px-1 py-0.2 text-[8.5px] font-bold text-warn">FOIL</span>}
+                {r.finish === 'etched' && <span className="ml-1.5 rounded bg-accent/15 px-1 py-0.2 text-[8.5px] font-bold text-accent">ETCH</span>}
               </span>
               <span className="tnum relative w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
               <span className="tnum relative w-14 text-right font-medium text-foreground">{usd(r.ck_price, { compact: true })}</span>
@@ -233,7 +262,7 @@ export function ArbitrageBook({
                 {hot ? (
                   <Star className="h-3 w-3 fill-warn text-warn" />
                 ) : (
-                  <ArrowUp className="h-3 w-3 text-up" />
+                  <ArrowUp className="h-3 w-3 text-up opacity-70" />
                 )}
               </span>
             </button>
@@ -241,31 +270,46 @@ export function ArbitrageBook({
         })}
       </div>
 
-      {/* Execution Blotter Footer */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-t border-border-strong bg-surface px-3 text-[10px] uppercase text-dim">
-        {stagedCount === 0 ? (
-          <span>
-            <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> Cycle ·{' '}
-            <kbd className="text-muted-foreground">SPC</kbd> Stage Allocation
-          </span>
-        ) : (
-          <div className="flex w-full items-center justify-between">
-            <span className="flex items-center gap-1.5 text-foreground font-mono text-[10px]">
-              <span className="font-semibold text-accent">{stagedCount}</span> Allocated
-              <span className="text-border-strong">|</span>
-              <span className="text-dim">Basis:</span> {usd(stagedBasis, { compact: true })}
+      {/* Slide-Up Institutional Execution Blotter HUD */}
+      {stagedCount > 0 && (
+        <div className="border-t border-accent/60 bg-surface-2 px-3 py-2 shadow-2xl">
+          <div className="mb-1.5 flex items-center justify-between text-[10px] font-mono">
+            <span className="flex items-center gap-1.5 font-semibold uppercase text-accent">
+              <Sparkles className="h-3 w-3" />
+              <span>[{stagedCount}] Staged Order Manifest</span>
             </span>
+            <span className="text-dim">
+              Blended ROI: <span className={`font-bold ${blendedROI >= 10 ? 'text-up' : 'text-warn'}`}>{pct(blendedROI)}</span>
+            </span>
+          </div>
+          <div className="flex items-center justify-between font-mono text-[10px]">
+            <div className="flex items-center gap-2 text-dim">
+              <span>Basis: <strong className="text-foreground">{usd(stagedBasis, { compact: true })}</strong></span>
+              <span>·</span>
+              <span>Exp. Payout: <strong className="text-foreground">{usd(stagedExpectedPayout, { compact: true })}</strong></span>
+            </div>
             <button
               type="button"
               onClick={handleExportCSV}
-              className="flex items-center gap-1 rounded-sm border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[9px] font-semibold text-accent transition-colors hover:bg-accent/25"
+              className="flex items-center gap-1 rounded-sm border border-accent bg-accent/20 px-2.5 py-0.5 text-[9.5px] font-semibold text-accent transition-colors hover:bg-accent hover:text-accent-foreground"
             >
-              <Download className="h-2.5 w-2.5" />
-              <span>Generate Manifest (CSV)</span>
+              <Download className="h-3 w-3" />
+              <span>Export Blotter</span>
             </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Permanent Navigation Hint Footer */}
+      {stagedCount === 0 && (
+        <div className="flex h-7 shrink-0 items-center justify-between border-t border-border-strong bg-surface px-3 text-[9.5px] uppercase text-dim">
+          <span>
+            <kbd className="text-muted-foreground">J</kbd>/<kbd className="text-muted-foreground">K</kbd> Select ·{' '}
+            <kbd className="text-muted-foreground">SPC</kbd> Stage Batch
+          </span>
+          <span className="font-mono">Direct/SYP Active</span>
+        </div>
+      )}
     </section>
   )
 }

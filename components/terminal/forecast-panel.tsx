@@ -1,17 +1,17 @@
 'use client'
 
 import { useMemo, useRef, useState } from 'react'
-import { Activity, Crosshair, TrendingDown, TrendingUp } from 'lucide-react'
+import { Activity, BarChart2, Crosshair, Layers, TrendingDown, TrendingUp } from 'lucide-react'
 import { useForecast, useHistory, useSummary } from '@/lib/hooks'
 import { buildTimeSeries, type DriftPoint } from '@/lib/series'
 import { usd, pct, count, shortUuid } from '@/lib/format'
 
-const W = 900
-const H = 380
-const padL = 58
-const padR = 14
+const W = 960
+const H = 390
+const padL = 60
+const padR = 48
 const padT = 16
-const VOL_H = 56
+const VOL_H = 54
 const VOL_GAP = 10
 const padB = 26
 
@@ -29,8 +29,10 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
   const [vendor, setVendor] = useState<string>('tcgplayer')
   const [priceMode, setPriceMode] = useState<PriceMode>('nominal')
   const [showBands, setShowBands] = useState(true)
+  const [showVPVR, setShowVPVR] = useState(true)
   const [hoverDay, setHoverDay] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
+
   const finish = selectedFinish
   const setFinish = onFinishChange
 
@@ -40,7 +42,16 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
   const { points, stats } = useMemo(() => {
     if (!uuid || history.length === 0) {
-      return { points: [] as DriftPoint[], stats: { realizedVol: 0, lastClose: 0, driftVol: 0 } }
+      return {
+        points: [] as DriftPoint[],
+        stats: {
+          realizedVol: 0,
+          lastClose: 0,
+          driftVol: 0,
+          changeFromFirstPct: 0,
+          volumeProfile: [],
+        },
+      }
     }
     return buildTimeSeries(history, forecast ?? null)
   }, [uuid, history, forecast])
@@ -54,7 +65,14 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
     const vals: number[] = []
     for (const p of points) {
-      const series: (number | null)[] = [p[priceKey] as number | null, p.sma7, p.sma30, p.forecast, p.upper, p.lower]
+      const series: (number | null)[] = [
+        p[priceKey] as number | null,
+        p.sma7,
+        p.sma30,
+        p.forecast,
+        p.upper,
+        p.lower,
+      ]
       if (showBands) series.push(p.bollUpper, p.bollLower)
       for (const v of series) {
         if (v != null && !isNaN(v) && v > 0) vals.push(v)
@@ -64,7 +82,7 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
     const min = Math.min(...vals)
     const max = Math.max(...vals)
-    const pad = (max - min) * 0.14 || max * 0.1
+    const pad = (max - min) * 0.12 || max * 0.08
     const lo = Math.max(0.01, min - pad)
     const hi = max + pad
 
@@ -82,36 +100,33 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
     const line = (key: keyof DriftPoint) =>
       points
-        .map((p: DriftPoint) => (p[key] == null || isNaN(p[key] as number) ? null : `${x(p.day)},${y(p[key] as number)}`))
+        .map((p: DriftPoint) =>
+          p[key] == null || isNaN(p[key] as number)
+            ? null
+            : `${x(p.day).toFixed(1)},${y(p[key] as number).toFixed(1)}`
+        )
         .filter(Boolean)
         .join(' ')
 
-    const upper = points.filter((p: DriftPoint) => p.upper != null && !isNaN(p.upper))
-    const lower = points.filter((p: DriftPoint) => p.lower != null && !isNaN(p.lower))
-    let cone = ''
-    if (upper.length && lower.length) {
-      const up = upper.map((p: DriftPoint) => `${x(p.day)},${y(p.upper as number)}`)
-      const lowRev = [...lower].reverse().map((p: DriftPoint) => `${x(p.day)},${y(p.lower as number)}`)
-      cone = `${up.join(' ')} ${lowRev.join(' ')}`
+    const makePolygon = (upKey: keyof DriftPoint, lowKey: keyof DriftPoint) => {
+      const upper = points.filter((p) => p[upKey] != null && !isNaN(p[upKey] as number))
+      const lower = points.filter((p) => p[lowKey] != null && !isNaN(p[lowKey] as number))
+      if (!upper.length || !lower.length) return ''
+      const up = upper.map((p) => `${x(p.day).toFixed(1)},${y(p[upKey] as number).toFixed(1)}`)
+      const lowRev = [...lower]
+        .reverse()
+        .map((p) => `${x(p.day).toFixed(1)},${y(p[lowKey] as number).toFixed(1)}`)
+      return `${up.join(' ')} ${lowRev.join(' ')}`
     }
 
-    let band = ''
-    if (showBands) {
-      const bu = points.filter((p: DriftPoint) => p.bollUpper != null)
-      const bl = points.filter((p: DriftPoint) => p.bollLower != null)
-      if (bu.length && bl.length) {
-        const up = bu.map((p: DriftPoint) => `${x(p.day)},${y(p.bollUpper as number)}`)
-        const lowRev = [...bl].reverse().map((p: DriftPoint) => `${x(p.day)},${y(p.bollLower as number)}`)
-        band = `${up.join(' ')} ${lowRev.join(' ')}`
-      }
-    }
+    const cone2s = makePolygon('upper', 'lower')
+    const cone1s = makePolygon('upper1s', 'lower1s')
+    const band = showBands ? makePolygon('bollUpper', 'bollLower') : ''
 
-    // Volume sub-chart scaling
     const volVals = points.filter((p) => p.day <= 0).map((p: DriftPoint) => p.volume ?? 0)
     const volMax = Math.max(1, ...volVals)
     const volTop = priceBottom + VOL_GAP
-    const validVolCount = Math.max(1, points.filter((p: DriftPoint) => p.day <= 0).length)
-    const barW = Math.max(2, (plotW / (points.length + 2)) * 0.75)
+    const barW = Math.max(2, (plotW / (points.length + 2)) * 0.72)
     const volBar = (v: number) => (v / volMax) * (VOL_H - 4)
 
     const ticks = 5
@@ -122,11 +137,33 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
     const xLabels = points
       .filter((_: DriftPoint, i: number) => i % 8 === 0 || points[i].day === 0)
-      .map((p: DriftPoint) => ({ x: x(p.day), label: p.day === 0 ? 'NOW' : p.date, now: p.day === 0 }))
+      .map((p: DriftPoint) => ({
+        x: x(p.day),
+        label: p.day === 0 ? 'NOW' : p.date,
+        now: p.day === 0,
+      }))
 
     return {
-      x, y, nowX, line, cone, band, yTicks, xLabels, minDay, maxDay,
-      priceBottom, plotW, volTop, barW, volBar, priceKey,
+      x,
+      y,
+      nowX,
+      line,
+      cone2s,
+      cone1s,
+      band,
+      yTicks,
+      xLabels,
+      minDay,
+      maxDay,
+      priceBottom,
+      plotW,
+      plotH,
+      volTop,
+      barW,
+      volBar,
+      priceKey,
+      lo,
+      hi,
     }
   }, [points, priceMode, showBands])
 
@@ -152,13 +189,14 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-panel" aria-label="Asset forecast and historical series">
+      {/* Control Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-strong bg-surface px-3 py-1.5">
         <div className="flex items-baseline gap-2">
           <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Asset Forecast</h2>
           {name && (
             <span className="text-[11px] text-accent">
               {name}
-              {uuid && <span className="ml-2 text-dim">UUID {shortUuid(uuid)}</span>}
+              {uuid && <span className="ml-2 text-dim font-mono text-[10px]">UUID {shortUuid(uuid)}</span>}
               {isIlliquid && (
                 <span className="ml-2 rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[9px] font-mono text-warn">
                   UNQUOTED
@@ -208,7 +246,20 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
                 : 'border-border text-dim hover:text-muted-foreground'
             }`}
           >
-            σ bands
+            2σ bands
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowVPVR((v) => !v)}
+            className={`flex items-center gap-1 rounded-sm border px-1.5 py-0.5 transition-colors ${
+              showVPVR
+                ? 'border-accent/40 bg-accent/10 text-accent font-medium'
+                : 'border-border text-dim hover:text-muted-foreground'
+            }`}
+          >
+            <BarChart2 className="h-2.5 w-2.5" />
+            <span>VPVR</span>
           </button>
 
           <div className="hidden overflow-hidden rounded-sm border border-border lg:flex">
@@ -245,6 +296,7 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
         </div>
       </div>
 
+      {/* Quantitative Sub-Header */}
       {geom && (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-border bg-surface/40 px-3 py-1 text-[10px] uppercase">
           <StatChip
@@ -257,14 +309,20 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
             value={stats.driftVol.toFixed(2)}
             tone={stats.driftVol >= 0 ? 'text-up' : 'text-down'}
           />
+          <StatChip
+            label="Historical Range"
+            value={`${pct(stats.changeFromFirstPct)}`}
+            tone={stats.changeFromFirstPct >= 0 ? 'text-up' : 'text-down'}
+          />
           <StatChip label="Last Close" value={usd(stats.lastClose, { compact: true })} tone="text-foreground" />
           <span className="ml-auto flex items-center gap-1 text-dim">
-            <Activity className="h-3 w-3" />
-            {priceMode === 'risk' ? 'VOLATILITY-PENALIZED EQUITY' : 'NOMINAL CLOSE'}
+            <Activity className="h-3 w-3 text-accent" />
+            {priceMode === 'risk' ? 'VOLATILITY-PENALIZED TRAJECTORY' : 'RAW MARGINAL CLOSE'}
           </span>
         </div>
       )}
 
+      {/* Primary SVG Charting Canvas */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center p-2">
         {!uuid && (
           <div className="flex flex-col items-center justify-center gap-2 text-center text-dim">
@@ -288,47 +346,108 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
           <svg
             ref={svgRef}
             viewBox={`0 0 ${W} ${H}`}
-            className="h-full w-full max-h-full cursor-crosshair"
+            className="h-full w-full max-h-full cursor-crosshair select-none"
             preserveAspectRatio="xMidYMid meet"
             role="img"
             aria-label="Price history, Bollinger bands, forecast, and volume"
             onMouseMove={handleMove}
             onMouseLeave={() => setHoverDay(null)}
           >
-            {/* Horizontal Grid */}
+            <defs>
+              {/* Gaussian-like Probability Density Fan Gradients */}
+              <linearGradient id="cone-density-2s" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--forecast)" stopOpacity="0.04" />
+                <stop offset="50%" stopColor="var(--forecast)" stopOpacity="0.22" />
+                <stop offset="100%" stopColor="var(--forecast)" stopOpacity="0.04" />
+              </linearGradient>
+              <linearGradient id="cone-density-1s" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--forecast)" stopOpacity="0.10" />
+                <stop offset="50%" stopColor="var(--forecast)" stopOpacity="0.32" />
+                <stop offset="100%" stopColor="var(--forecast)" stopOpacity="0.10" />
+              </linearGradient>
+              {/* Volume Profile Gradient */}
+              <linearGradient id="vpvr-gradient" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.05" />
+                <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.25" />
+              </linearGradient>
+              <linearGradient id="vpvr-poc" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="var(--warn)" stopOpacity="0.15" />
+                <stop offset="100%" stopColor="var(--warn)" stopOpacity="0.45" />
+              </linearGradient>
+            </defs>
+
+            {/* Horizontal Gridlines */}
             {geom.yTicks.map((t: { val: number; y: number }, i: number) => (
               <g key={i}>
-                <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="var(--border)" strokeWidth={0.5} />
-                <text x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-dim" fontSize={9}>
+                <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="var(--border)" strokeWidth={0.5} strokeDasharray="2 4" />
+                <text x={padL - 6} y={t.y + 3} textAnchor="end" className="fill-dim font-mono" fontSize={8.5}>
                   {t.val >= 1000 ? `$${(t.val / 1000).toFixed(1)}K` : `$${t.val.toFixed(t.val >= 100 ? 0 : 2)}`}
                 </text>
               </g>
             ))}
 
-            {/* Forecast Shading */}
+            {/* Volume Profile by Price (VPVR) on Right Axis */}
+            {showVPVR &&
+              stats.volumeProfile.map((b, i) => {
+                const yTop = geom.y(b.priceHi)
+                const yBot = geom.y(b.priceLo)
+                const barHeight = Math.max(1, yBot - yTop)
+                const vpvrWidth = (b.volumePct / 100) * (padR + 60)
+                const xPos = W - padR - vpvrWidth
+
+                return (
+                  <g key={`vpvr-${i}`}>
+                    <rect
+                      x={xPos}
+                      y={yTop}
+                      width={vpvrWidth}
+                      height={barHeight - 0.5}
+                      fill={b.isPOC ? 'url(#vpvr-poc)' : 'url(#vpvr-gradient)'}
+                    />
+                    {b.isPOC && (
+                      <line
+                        x1={padL}
+                        y1={geom.y(b.priceMid)}
+                        x2={W - padR}
+                        y2={geom.y(b.priceMid)}
+                        stroke="var(--warn)"
+                        strokeWidth={0.75}
+                        strokeDasharray="1 3"
+                        opacity={0.7}
+                      />
+                    )}
+                  </g>
+                )
+              })}
+
+            {/* Forward Horizon Background Tint */}
             <rect
               x={geom.nowX}
               y={padT}
               width={Math.max(0, W - padR - geom.nowX)}
               height={geom.priceBottom - padT}
               fill="var(--accent)"
-              opacity={0.04}
+              opacity={0.03}
             />
 
-            {/* Bollinger & Uncertainty Ribbons */}
-            {geom.band && <polygon points={geom.band} fill="var(--band)" opacity={0.08} />}
-            {geom.cone && <polygon points={geom.cone} fill="var(--forecast)" opacity={0.16} />}
+            {/* Uncertainty Probability Cones */}
+            {geom.cone2s && <polygon points={geom.cone2s} fill="url(#cone-density-2s)" />}
+            {geom.cone1s && <polygon points={geom.cone1s} fill="url(#cone-density-1s)" />}
 
+            {/* Bollinger Ribbon & Envelopes */}
+            {showBands && geom.band && <polygon points={geom.band} fill="var(--band)" opacity={0.07} />}
             {showBands && (
               <>
-                <polyline points={geom.line('bollUpper')} fill="none" stroke="var(--band)" strokeWidth={0.75} strokeDasharray="1 3" opacity={0.7} />
-                <polyline points={geom.line('bollLower')} fill="none" stroke="var(--band)" strokeWidth={0.75} strokeDasharray="1 3" opacity={0.7} />
+                <polyline points={geom.line('bollUpper')} fill="none" stroke="var(--band)" strokeWidth={0.75} strokeDasharray="1 3" opacity={0.65} />
+                <polyline points={geom.line('bollLower')} fill="none" stroke="var(--band)" strokeWidth={0.75} strokeDasharray="1 3" opacity={0.65} />
               </>
             )}
 
+            {/* Moving Averages */}
             <polyline points={geom.line('sma30')} fill="none" stroke="var(--sma30)" strokeWidth={1} strokeDasharray="2 2" />
             <polyline points={geom.line('sma7')} fill="none" stroke="var(--sma7)" strokeWidth={1.25} />
-            
+
+            {/* Primary Price Series */}
             <polyline
               points={geom.line(geom.priceKey)}
               fill="none"
@@ -336,12 +455,30 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
               strokeWidth={1.75}
             />
 
-            <polyline points={geom.line('forecast')} fill="none" stroke="var(--forecast)" strokeWidth={2} strokeDasharray="4 3" strokeLinecap="round" />
-            <line x1={geom.nowX} y1={padT} x2={geom.nowX} y2={geom.priceBottom} stroke="var(--border-strong)" strokeWidth={1} strokeDasharray="2 2" />
+            {/* 7-Day Forecast Trajectory */}
+            <polyline
+              points={geom.line('forecast')}
+              fill="none"
+              stroke="var(--forecast)"
+              strokeWidth={2}
+              strokeDasharray="4 3"
+              strokeLinecap="round"
+            />
 
-            {/* Volume Sub-Chart */}
+            {/* Present Timestamp Anchor Line */}
+            <line
+              x1={geom.nowX}
+              y1={padT}
+              x2={geom.nowX}
+              y2={geom.priceBottom}
+              stroke="var(--border-strong)"
+              strokeWidth={1}
+              strokeDasharray="2 2"
+            />
+
+            {/* Sub-Chart: Traded Volume Bars */}
             <line x1={padL} y1={geom.volTop} x2={W - padR} y2={geom.volTop} stroke="var(--border)" strokeWidth={0.5} />
-            <text x={padL - 6} y={geom.volTop + 10} textAnchor="end" className="fill-dim font-bold" fontSize={8}>
+            <text x={padL - 6} y={geom.volTop + 10} textAnchor="end" className="fill-dim font-mono font-bold" fontSize={8}>
               VOL
             </text>
             {points.map((p: DriftPoint, i: number) => {
@@ -357,13 +494,13 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
                   width={geom.barW}
                   height={Math.max(2, barH)}
                   fill={hovered?.day === p.day ? 'var(--accent)' : isUp ? 'var(--up)' : 'var(--down)'}
-                  opacity={hovered?.day === p.day ? 1 : isUp ? 0.6 : 0.45}
+                  opacity={hovered?.day === p.day ? 1 : isUp ? 0.65 : 0.45}
                   rx={0.5}
                 />
               )
             })}
 
-            {/* 7-Day Target Horizon Point */}
+            {/* 7D Target Horizon Coordinate */}
             {forecast && points.length > 0 && (
               <circle
                 cx={geom.x(points[points.length - 1].day)}
@@ -371,11 +508,11 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
                 r={3.5}
                 fill="var(--forecast)"
                 stroke="var(--background)"
-                strokeWidth={1}
+                strokeWidth={1.5}
               />
             )}
 
-            {/* Interactive Crosshair */}
+            {/* Interactive Crosshair Alignment */}
             {hovered && (
               <g pointerEvents="none">
                 <line
@@ -386,29 +523,30 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
                   stroke="var(--accent)"
                   strokeWidth={0.75}
                   strokeDasharray="2 2"
-                  opacity={0.7}
+                  opacity={0.8}
                 />
                 {hovered[geom.priceKey] != null && (
                   <circle
                     cx={geom.x(hovered.day)}
                     cy={geom.y(hovered[geom.priceKey] as number)}
-                    r={3}
+                    r={3.5}
                     fill="var(--accent)"
                     stroke="var(--background)"
-                    strokeWidth={1}
+                    strokeWidth={1.5}
                   />
                 )}
               </g>
             )}
 
+            {/* X-Axis Date Labels */}
             {geom.xLabels.map((l: { x: number; label: string; now: boolean }, i: number) => (
               <text
                 key={i}
                 x={l.x}
                 y={H - 8}
                 textAnchor="middle"
-                fontSize={9}
-                className={l.now ? 'fill-accent font-semibold' : 'fill-dim'}
+                fontSize={8.5}
+                className={`font-mono ${l.now ? 'fill-accent font-semibold' : 'fill-dim'}`}
               >
                 {l.label}
               </text>
@@ -416,48 +554,65 @@ export function ForecastPanel({ uuid, selectedFinish, onFinishChange }: Forecast
           </svg>
         )}
 
-        {/* Crosshair Inspect HUD */}
+        {/* HUD Crosshair Tooltip */}
         {hovered && geom && (
-          <div className="pointer-events-none absolute left-3 top-11 z-10 min-w-40 rounded-sm border border-border-strong bg-surface/95 p-2 text-[10px] shadow-lg backdrop-blur">
-            <div className="mb-1 flex items-center justify-between border-b border-border/60 pb-1">
+          <div className="pointer-events-none absolute left-3 top-10 z-20 min-w-44 rounded-sm border border-border-strong bg-surface/95 p-2.5 text-[10px] shadow-2xl backdrop-blur-md">
+            <div className="mb-1.5 flex items-center justify-between border-b border-border/60 pb-1 font-mono">
               <span className="font-semibold uppercase tracking-wider text-accent">
-                {hovered.day === 0 ? 'NOW' : hovered.day > 0 ? `T+${hovered.day}` : hovered.date}
+                {hovered.day === 0 ? 'T+0 (NOW)' : hovered.day > 0 ? `T+${hovered.day} (FWD)` : hovered.date}
               </span>
               <span className="text-dim">{hovered.date}</span>
             </div>
-            <InspectRow
-              label={priceMode === 'risk' ? 'Risk-Adj' : 'Close'}
-              value={usd(hovered[geom.priceKey] as number | null, { compact: true })}
-              tone="text-foreground font-semibold"
-            />
-            {hovered.forecast != null && hovered.day >= 0 && (
-              <InspectRow label="Forecast" value={usd(hovered.forecast, { compact: true })} tone="text-forecast" />
-            )}
-            <InspectRow label="SMA-7" value={usd(hovered.sma7, { compact: true })} tone="text-sma7" />
-            <InspectRow label="SMA-30" value={usd(hovered.sma30, { compact: true })} tone="text-muted-foreground" />
-            {showBands && hovered.bollUpper != null && (
+            <div className="space-y-1">
               <InspectRow
-                label="σ Band"
-                value={`${usd(hovered.bollLower, { compact: true })} – ${usd(hovered.bollUpper, { compact: true })}`}
-                tone="text-band"
+                label={priceMode === 'risk' ? 'Risk-Adj' : 'Close'}
+                value={usd(hovered[geom.priceKey] as number | null, { compact: true })}
+                tone="text-foreground font-semibold"
               />
-            )}
-            {hovered.volume != null && <InspectRow label="Volume" value={count(hovered.volume)} tone="text-muted-foreground" />}
+              {hovered.forecast != null && hovered.day >= 0 && (
+                <InspectRow label="Forecast (XGB)" value={usd(hovered.forecast, { compact: true })} tone="text-forecast font-semibold" />
+              )}
+              {hovered.upper != null && hovered.day > 0 && (
+                <InspectRow
+                  label="2σ Range"
+                  value={`${usd(hovered.lower, { compact: true })} – ${usd(hovered.upper, { compact: true })}`}
+                  tone="text-dim"
+                />
+              )}
+              <InspectRow label="SMA-7" value={usd(hovered.sma7, { compact: true })} tone="text-sma7" />
+              <InspectRow label="SMA-30" value={usd(hovered.sma30, { compact: true })} tone="text-muted-foreground" />
+              {showBands && hovered.bollUpper != null && (
+                <InspectRow
+                  label="Bollinger 2σ"
+                  value={`${usd(hovered.bollLower, { compact: true })} – ${usd(hovered.bollUpper, { compact: true })}`}
+                  tone="text-band"
+                />
+              )}
+              {hovered.volume != null && (
+                <InspectRow
+                  label="Daily Vol"
+                  value={`${count(hovered.volume)} (${hovered.dailyReturnPct ? pct(hovered.dailyReturnPct) : '—'})`}
+                  tone="text-muted-foreground"
+                />
+              )}
+            </div>
           </div>
         )}
       </div>
 
+      {/* Legend & Horizon Metric Footer */}
       {forecast && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border bg-surface/50 px-3 py-1.5 text-[10px] uppercase">
           <Legend color="var(--hist)" label={priceMode === 'risk' ? 'Risk-Adj' : 'Actual'} />
           <Legend color="var(--sma7)" label="SMA-7" />
           <Legend color="var(--sma30)" label="SMA-30" dashed />
           {showBands && <Legend color="var(--band)" label="Bollinger 2σ" dashed />}
-          <Legend color="var(--forecast)" label="XGB 7D" dashed />
+          <Legend color="var(--forecast)" label="XGB 7D Fan" dashed />
+          {showVPVR && <Legend color="var(--warn)" label="POC Level" dashed />}
           <span className="ml-auto flex items-center gap-2">
-            <span className="text-dim">7D Target</span>
-            <span className="tnum font-medium text-forecast">{usd(forecast.predicted_7d_price, { compact: true })}</span>
-            <span className={`tnum flex items-center gap-0.5 font-medium ${gainPositive ? 'text-up' : 'text-down'}`}>
+            <span className="text-dim">7D Projected Exit:</span>
+            <span className="tnum font-semibold text-forecast">{usd(forecast.predicted_7d_price, { compact: true })}</span>
+            <span className={`tnum flex items-center gap-0.5 font-semibold ${gainPositive ? 'text-up' : 'text-down'}`}>
               {gainPositive ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
               {pct(forecast.predicted_gain_pct)}
             </span>
@@ -479,7 +634,7 @@ function StatChip({ label, value, tone }: { label: string; value: string; tone: 
 
 function InspectRow({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-0.5">
+    <div className="flex items-center justify-between gap-4 font-mono text-[9.5px]">
       <span className="uppercase text-dim">{label}</span>
       <span className={`tnum ${tone ?? 'text-foreground'}`}>{value}</span>
     </div>
@@ -488,9 +643,9 @@ function InspectRow({ label, value, tone }: { label: string; value: string; tone
 
 function Legend({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
   return (
-    <span className="flex items-center gap-1.5">
+    <span className="flex items-center gap-1.5 font-mono text-[9.5px]">
       <span
-        className="inline-block h-0.5 w-4"
+        className="inline-block h-0.5 w-3.5"
         style={{ background: dashed ? 'none' : color, borderTop: dashed ? `1.5px dashed ${color}` : undefined }}
       />
       <span className="text-muted-foreground">{label}</span>

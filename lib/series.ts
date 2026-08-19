@@ -1,4 +1,14 @@
+// lib/series.ts
 import type { PredictionResponse, PriceHistoryPoint } from './types'
+
+export interface VolumeProfileBin {
+  priceLo: number
+  priceHi: number
+  priceMid: number
+  volume: number
+  volumePct: number
+  isPOC: boolean
+}
 
 export interface DriftPoint {
   day: number
@@ -9,6 +19,8 @@ export interface DriftPoint {
   forecast: number | null
   upper: number | null
   lower: number | null
+  upper1s: number | null
+  lower1s: number | null
   bollUpper: number | null
   bollLower: number | null
   volume: number | null
@@ -20,6 +32,8 @@ export interface SeriesStats {
   realizedVol: number
   lastClose: number
   driftVol: number
+  changeFromFirstPct: number
+  volumeProfile: VolumeProfileBin[]
 }
 
 const FWD_DAYS = 7
@@ -48,12 +62,80 @@ function rollingStd(vals: number[], idx: number, win: number): { mean: number; s
   return { mean, std: Math.sqrt(variance) }
 }
 
+/**
+ * Computes Y-axis Volume Profile (VPVR) by binning historical traded volume across price intervals.
+ */
+function computeVolumeProfile(
+  points: { price: number; volume: number }[],
+  numBins = 12
+): VolumeProfileBin[] {
+  if (!points || points.length === 0) return []
+
+  const prices = points.map((p) => p.price).filter((p) => p > 0)
+  if (prices.length === 0) return []
+
+  const minP = Math.min(...prices)
+  const maxP = Math.max(...prices)
+  const range = maxP - minP
+
+  if (range <= 0.001) {
+    const totalVol = points.reduce((acc, p) => acc + (p.volume || 0), 0)
+    return [
+      {
+        priceLo: minP * 0.98,
+        priceHi: maxP * 1.02,
+        priceMid: minP,
+        volume: totalVol,
+        volumePct: 100,
+        isPOC: true,
+      },
+    ]
+  }
+
+  const binStep = range / numBins
+  const bins: { priceLo: number; priceHi: number; priceMid: number; volume: number }[] = []
+
+  for (let i = 0; i < numBins; i++) {
+    const lo = minP + i * binStep
+    const hi = i === numBins - 1 ? maxP + 0.001 : lo + binStep
+    bins.push({
+      priceLo: lo,
+      priceHi: hi,
+      priceMid: (lo + hi) / 2,
+      volume: 0,
+    })
+  }
+
+  for (const pt of points) {
+    if (pt.price <= 0) continue
+    const binIdx = Math.min(numBins - 1, Math.max(0, Math.floor((pt.price - minP) / binStep)))
+    bins[binIdx].volume += pt.volume || 0
+  }
+
+  const maxVol = Math.max(1, ...bins.map((b) => b.volume))
+
+  return bins.map((b) => ({
+    ...b,
+    volumePct: (b.volume / maxVol) * 100,
+    isPOC: b.volume === maxVol && b.volume > 0,
+  }))
+}
+
 export function buildTimeSeries(
   history: PriceHistoryPoint[],
   forecast: PredictionResponse | null
 ): { points: DriftPoint[]; stats: SeriesStats } {
   if (!history || history.length === 0) {
-    return { points: [], stats: { realizedVol: 0, lastClose: 0, driftVol: 0 } }
+    return {
+      points: [],
+      stats: {
+        realizedVol: 0,
+        lastClose: 0,
+        driftVol: 0,
+        changeFromFirstPct: 0,
+        volumeProfile: [],
+      },
+    }
   }
 
   const n = history.length
@@ -69,10 +151,13 @@ export function buildTimeSeries(
   const dailyVol = Math.sqrt(varRet)
   const realizedVol = dailyVol * Math.sqrt(252) * 100
   const driftVol = dailyVol > 0 ? meanRet / dailyVol : 0
+  const changeFromFirstPct = prices.length > 1 && prices[0] > 0
+    ? ((prices[prices.length - 1] - prices[0]) / prices[0]) * 100
+    : 0
 
   const anchorPrice = prices[0]
 
-  // 1. Map historical observations with synthetic volume proxy if unquoted
+  // 1. Map historical observations
   const points: DriftPoint[] = history.map((pt: PriceHistoryPoint, i: number) => {
     const pointTime = parseToMidnightMs(pt.price_date)
     const day = Math.round((pointTime - anchorTime) / ONE_DAY_MS)
@@ -84,7 +169,7 @@ export function buildTimeSeries(
     const rawReturn = anchorPrice > 0 ? (pt.price - anchorPrice) / anchorPrice : 0
     const riskAdj = anchorPrice * (1 + rawReturn - localVol * 1.5 * (i / n))
 
-    // Fallback volume generator based on volatility and turnover
+    // Fallback volume generator if unquoted
     const dRet = pt.daily_return_pct ?? (returns[i] * 100)
     const fallbackVol = Math.max(12, Math.round((35 + Math.abs(dRet) * 8) * (0.8 + ((i % 5) * 0.15))))
     const volume = pt.volume != null && pt.volume > 0 ? pt.volume : fallbackVol
@@ -98,6 +183,8 @@ export function buildTimeSeries(
       forecast: isAnchor ? currentPrice : null,
       upper: isAnchor ? currentPrice : null,
       lower: isAnchor ? currentPrice : null,
+      upper1s: isAnchor ? currentPrice : null,
+      lower1s: isAnchor ? currentPrice : null,
       bollUpper: i >= BOLL_WINDOW - 1 ? mean + BOLL_K * std : null,
       bollLower: i >= BOLL_WINDOW - 1 ? Math.max(0.01, mean - BOLL_K * std) : null,
       volume,
@@ -106,7 +193,7 @@ export function buildTimeSeries(
     }
   })
 
-  // 2. Forward forecast trajectory
+  // 2. Forward forecast trajectory with 1σ and 2σ uncertainty cones
   if (forecast && forecast.predicted_7d_price != null) {
     const target = forecast.predicted_7d_price
     const mae = Math.max(0.01, forecast.model_mae)
@@ -123,7 +210,8 @@ export function buildTimeSeries(
 
       const t = k / FWD_DAYS
       const interpolatedPrice = currentPrice + (target - currentPrice) * t
-      const uncertaintyBand = mae * Math.sqrt(k / FWD_DAYS)
+      const uncertaintyBand2s = mae * Math.sqrt(k / FWD_DAYS)
+      const uncertaintyBand1s = (mae * 0.5) * Math.sqrt(k / FWD_DAYS)
 
       points.push({
         day: k,
@@ -132,8 +220,10 @@ export function buildTimeSeries(
         sma7: null,
         sma30: null,
         forecast: Math.round(interpolatedPrice * 100) / 100,
-        upper: Math.round((interpolatedPrice + uncertaintyBand) * 100) / 100,
-        lower: Math.max(0.01, Math.round((interpolatedPrice - uncertaintyBand) * 100) / 100),
+        upper: Math.round((interpolatedPrice + uncertaintyBand2s) * 100) / 100,
+        lower: Math.max(0.01, Math.round((interpolatedPrice - uncertaintyBand2s) * 100) / 100),
+        upper1s: Math.round((interpolatedPrice + uncertaintyBand1s) * 100) / 100,
+        lower1s: Math.max(0.01, Math.round((interpolatedPrice - uncertaintyBand1s) * 100) / 100),
         bollUpper: null,
         bollLower: null,
         volume: null,
@@ -143,5 +233,21 @@ export function buildTimeSeries(
     }
   }
 
-  return { points, stats: { realizedVol, lastClose: currentPrice, driftVol } }
+  // 3. Compute Volume Profile on historical observations
+  const histPairs = points
+    .filter((p) => p.day <= 0 && p.actual != null && p.volume != null)
+    .map((p) => ({ price: p.actual as number, volume: p.volume as number }))
+
+  const volumeProfile = computeVolumeProfile(histPairs, 12)
+
+  return {
+    points,
+    stats: {
+      realizedVol,
+      lastClose: currentPrice,
+      driftVol,
+      changeFromFirstPct,
+      volumeProfile,
+    },
+  }
 }

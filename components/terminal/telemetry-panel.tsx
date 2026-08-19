@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, ChevronRight, Sliders, TrendingUp } from 'lucide-react'
 import { useForecast, useSummary, usePrintings } from '@/lib/hooks'
 import { runEconomics, type EconInputs, type WaterfallStep } from '@/lib/economics'
 import { usd, pct, signedUsd, shortUuid } from '@/lib/format'
@@ -18,12 +18,12 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
   const { data: forecast } = useForecast(uuid, 'tcgplayer', selectedFinish)
   const { printings } = usePrintings(uuid)
 
-  // Interactive assumption parameters driving the waterfall model.
   const [pro, setPro] = useState(true)
   const [hurdle, setHurdle] = useState(10)
   const [taxRate, setTaxRate] = useState(7.5)
   const [freight, setFreight] = useState(0.09)
   const [kappa, setKappa] = useState(98.5)
+  const [activeTab, setActiveTab] = useState<'waterfall' | 'sensitivity'>('waterfall')
 
   const name = summary?.name ?? (uuid ? shortUuid(uuid) : null)
   const setCode = summary?.set_code ?? '—'
@@ -43,14 +43,45 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
     return runEconomics(inputs)
   }, [forecast, pro, taxRate, freight, kappa, hurdle])
 
-  const isDeadZone = forecast?.is_dead_zone_clamped || (econ && econ.exitPrice >= 2.5 && econ.exitPrice <= 2.67)
+  const isDeadZone =
+    forecast?.is_dead_zone_clamped ||
+    (econ && econ.exitPrice >= 2.5 && econ.exitPrice <= 2.67)
+
+  // 2D Sensitivity Heatmap Matrix generator
+  const sensitivityMatrix = useMemo(() => {
+    if (!forecast || forecast.current_price <= 0) return []
+    const taxes = [5.0, 7.5, 10.0]
+    const kappas = [99.0, 97.0, 95.0]
+
+    return taxes.map((t) => {
+      return kappas.map((k) => {
+        const res = runEconomics({
+          exitPrice: forecast.predicted_7d_price,
+          acqPrice: forecast.current_price,
+          pro,
+          taxRate: t / 100,
+          freightPerUnit: freight,
+          kappa: k / 100,
+          hurdlePct: hurdle,
+        })
+        return {
+          tax: t,
+          kappa: k,
+          profit: res.netProfit,
+          roi: res.netRoiPct,
+          clears: res.clearsHurdle,
+        }
+      })
+    })
+  }, [forecast, pro, freight, hurdle])
 
   return (
     <section className="flex min-h-0 flex-col border-l border-border-strong bg-panel" aria-label="Unit economics and execution telemetry">
+      {/* Panel Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-foreground">Unit Economics</h2>
         {econ && (
-          <span className={`tnum text-[10px] font-semibold ${econ.clearsHurdle ? 'text-up' : 'text-down'}`}>
+          <span className={`tnum font-mono text-[10px] font-bold ${econ.clearsHurdle ? 'text-up' : 'text-down'}`}>
             {econ.clearsHurdle ? 'CLEARS HURDLE' : 'BELOW HURDLE'}
           </span>
         )}
@@ -61,16 +92,16 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
 
         {uuid && (
           <>
-            {/* SKU header */}
-            <div className="border-b border-border/60 bg-surface/40 p-3">
+            {/* SKU Overview */}
+            <div className="border-b border-border/60 bg-surface/40 p-3 font-mono">
               <div className="flex items-center justify-between text-[10px] uppercase text-dim">
-                <span>Selected SKU</span>
-                {collectorNum && <span className="font-mono text-dim">{collectorNum}</span>}
+                <span>Selected Instrument</span>
+                {collectorNum && <span className="text-dim">{collectorNum}</span>}
               </div>
-              <div className="mt-0.5 text-pretty text-[13px] font-medium text-accent">{name}</div>
+              <div className="mt-0.5 text-pretty text-[13px] font-semibold text-accent">{name}</div>
               <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 text-[10px]">
                 <span className="text-dim">
-                  Finish <span className="capitalize text-foreground">{selectedFinish}</span>
+                  Finish <span className="capitalize text-foreground font-semibold">{selectedFinish}</span>
                 </span>
                 <span className="text-dim">
                   Set <span className="font-semibold text-foreground">{setCode}</span>
@@ -84,10 +115,10 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
             </div>
 
             {!econ ? (
-              <div className="m-3 rounded-sm border border-warn/30 bg-warn/5 p-3">
+              <div className="m-3 rounded-sm border border-warn/30 bg-warn/5 p-3 font-mono">
                 <div className="flex items-center justify-between text-[10px] uppercase">
                   <span className="font-semibold text-warn">Execution Halted</span>
-                  <span className="font-mono text-[9px] text-dim">CODE: ILLIQUID</span>
+                  <span className="text-[9px] text-dim">CODE: ILLIQUID</span>
                 </div>
                 <p className="mt-1 text-[10px] leading-relaxed text-dim">
                   Zero active order book depth on tracked marketplaces. Automated Direct/SYP fulfillment and margin routing are offline for this variant.
@@ -95,27 +126,113 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
               </div>
             ) : (
               <>
-                {/* Waterfall chart */}
-                <div className="border-b border-border/60 p-3">
-                  <div className="mb-2 flex items-center justify-between text-[10px] uppercase text-dim">
-                    <span>Fee Decomposition Waterfall</span>
-                    <span className="tnum text-warn">{econ.feeLoadPct.toFixed(1)}% load</span>
-                  </div>
-                  <Waterfall steps={econ.steps} />
+                {/* Mode Selector Tabs */}
+                <div className="flex border-b border-border text-[10px] font-mono uppercase">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('waterfall')}
+                    className={`flex-1 py-1.5 font-semibold transition-colors ${
+                      activeTab === 'waterfall'
+                        ? 'border-b-2 border-accent bg-surface text-accent'
+                        : 'text-dim hover:text-foreground'
+                    }`}
+                  >
+                    Fee Waterfall
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('sensitivity')}
+                    className={`flex-1 py-1.5 font-semibold transition-colors ${
+                      activeTab === 'sensitivity'
+                        ? 'border-b-2 border-accent bg-surface text-accent'
+                        : 'text-dim hover:text-foreground'
+                    }`}
+                  >
+                    Sensitivity Matrix
+                  </button>
                 </div>
 
-                {/* Dead-zone fee cliff notice */}
-                {isDeadZone && (
-                  <div className="mx-3 mt-3 flex items-start gap-2 rounded-sm border border-warn/40 bg-warn/10 p-2 text-[10px] text-warn">
-                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-warn" />
-                    <div>
-                      <strong>Fee-Cliff Clamped:</strong> Target price was in the [$2.50, $2.67] dead zone. Exit pegged to $2.49 to optimize net margin.
+                {/* View 1: Fee Waterfall */}
+                {activeTab === 'waterfall' && (
+                  <div className="border-b border-border/60 p-3 font-mono">
+                    <div className="mb-2 flex items-center justify-between text-[10px] uppercase text-dim">
+                      <span>Fee Decomposition</span>
+                      <span className="tnum text-warn">{econ.feeLoadPct.toFixed(1)}% load</span>
+                    </div>
+                    <Waterfall steps={econ.steps} />
+                  </div>
+                )}
+
+                {/* View 2: Sensitivity Heatmap */}
+                {activeTab === 'sensitivity' && (
+                  <div className="border-b border-border/60 p-3 font-mono">
+                    <div className="mb-2 flex items-center justify-between text-[10px] uppercase text-dim">
+                      <span>Net Profit Matrix (Tax vs κ)</span>
+                      <span className="text-[9px] text-dim">3x3 Scenario</span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1 text-[9.5px]">
+                      <div className="text-dim">Tax \ κ</div>
+                      <div className="text-center font-bold text-foreground">99.0%</div>
+                      <div className="text-center font-bold text-foreground">97.0%</div>
+                      <div className="text-center font-bold text-foreground">95.0%</div>
+                      {sensitivityMatrix.map((row, rIdx) => (
+                        <div key={rIdx} className="contents">
+                          <div className="flex items-center text-dim font-bold">{row[0].tax}%</div>
+                          {row.map((cell, cIdx) => (
+                            <div
+                              key={cIdx}
+                              className={`flex flex-col items-center justify-center rounded-[2px] p-1 text-center font-bold ${
+                                cell.profit >= 0
+                                  ? cell.clears
+                                    ? 'bg-up/20 text-up border border-up/30'
+                                    : 'bg-warn/15 text-warn border border-warn/25'
+                                  : 'bg-down/20 text-down border border-down/30'
+                              }`}
+                            >
+                              <span>{signedUsd(cell.profit)}</span>
+                              <span className="text-[8px] opacity-75">{pct(cell.roi)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
 
-                {/* Verdict block */}
-                <div className="border-b border-border/60 p-3">
+                {/* Dead-Zone Fee Cliff Curve Visualization */}
+                {isDeadZone && (
+                  <div className="mx-3 mt-3 rounded-sm border border-warn/40 bg-warn/10 p-2.5 font-mono text-[10px] text-warn">
+                    <div className="flex items-center gap-1.5 font-bold uppercase">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      <span>[$2.50, $2.67] Dead-Zone Cliff Triggered</span>
+                    </div>
+                    <p className="mt-1 text-[9.5px] leading-relaxed text-dim">
+                      Target exit price intersects the fixed $1.12 step-up commission cliff. Payout clamped to $2.49 to eliminate severe marginal drag.
+                    </p>
+                    {/* Micro Dead-Zone Curve SVG */}
+                    <div className="mt-2 h-9 w-full border-b border-l border-warn/30">
+                      <svg viewBox="0 0 100 30" className="h-full w-full overflow-visible">
+                        <path
+                          d="M 0,22 L 48,8 L 50,26 L 100,6"
+                          fill="none"
+                          stroke="var(--warn)"
+                          strokeWidth="1.5"
+                        />
+                        <circle cx="48" cy="8" r="2.5" fill="var(--up)" />
+                        <circle cx="50" cy="26" r="2.5" fill="var(--down)" />
+                        <text x="48" y="5" fontSize="6" fill="var(--up)" textAnchor="middle">
+                          $2.49 ($1.25)
+                        </text>
+                        <text x="65" y="28" fontSize="6" fill="var(--down)" textAnchor="middle">
+                          $2.50 ($1.09)
+                        </text>
+                      </svg>
+                    </div>
+                  </div>
+                )}
+
+                {/* Payout Verdict Block */}
+                <div className="border-b border-border/60 p-3 font-mono">
                   <div className="grid grid-cols-2 gap-2">
                     <VerdictCell label="Net Payout" value={usd(econ.netPayout, { compact: true })} tone="text-foreground" />
                     <VerdictCell label="Landed Basis" value={usd(econ.landedBasis, { compact: true })} tone="text-muted-foreground" />
@@ -132,7 +249,7 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                     />
                   </div>
 
-                  {/* Hurdle gauge */}
+                  {/* Hurdle Gauge */}
                   <div className="mt-3">
                     <div className="mb-1 flex items-center justify-between text-[9px] uppercase text-dim">
                       <span>ROI vs Hurdle</span>
@@ -142,15 +259,20 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                     </div>
                     <HurdleGauge roi={econ.netRoiPct} hurdle={hurdle} />
                     <div className="mt-1.5 flex items-center justify-between text-[9px] text-dim">
-                      <span>Breakeven exit <span className="tnum text-muted-foreground">{usd(econ.breakevenExit, { compact: true })}</span></span>
-                      <span>Gross margin <span className="tnum text-muted-foreground">{pct(econ.grossMarginPct, false)}</span></span>
+                      <span>Breakeven exit: <span className="tnum text-muted-foreground">{usd(econ.breakevenExit, { compact: true })}</span></span>
+                      <span>Gross margin: <span className="tnum text-muted-foreground">{pct(econ.grossMarginPct, false)}</span></span>
                     </div>
                   </div>
                 </div>
 
-                {/* Interactive assumptions */}
-                <div className="border-b border-border/60 p-3">
-                  <div className="mb-2 text-[10px] uppercase text-dim">Assumptions</div>
+                {/* Interactive Scenario Assumptions */}
+                <div className="border-b border-border/60 p-3 font-mono">
+                  <div className="mb-2.5 flex items-center justify-between text-[10px] uppercase text-dim">
+                    <span className="flex items-center gap-1">
+                      <Sliders className="h-3 w-3 text-accent" />
+                      <span>Execution Parameters</span>
+                    </span>
+                  </div>
 
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-[10px] uppercase text-dim">Seller Tier</span>
@@ -158,16 +280,20 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                       <button
                         type="button"
                         onClick={() => setPro(true)}
-                        className={`px-2 py-0.5 transition-colors ${pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'}`}
+                        className={`px-2 py-0.5 transition-colors ${
+                          pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'
+                        }`}
                       >
-                        PRO
+                        PRO (8.95%)
                       </button>
                       <button
                         type="button"
                         onClick={() => setPro(false)}
-                        className={`px-2 py-0.5 transition-colors ${!pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'}`}
+                        className={`px-2 py-0.5 transition-colors ${
+                          !pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'
+                        }`}
                       >
-                        NON-PRO
+                        NON-PRO (10.75%)
                       </button>
                     </div>
                   </div>
@@ -180,11 +306,11 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
               </>
             )}
 
-            {/* Available printings */}
+            {/* Printings & Variant Switcher */}
             {printings.length > 0 && (
-              <div className="p-3">
+              <div className="p-3 font-mono">
                 <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
-                  <span>Available Printings</span>
+                  <span>Tracked Set Printings</span>
                   <span className="tnum">{printings.length} variants</span>
                 </div>
                 <div className="max-h-40 divide-y divide-border/40 overflow-y-auto rounded-sm border border-border bg-surface/60">
@@ -228,7 +354,6 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
   )
 }
 
-/** Bridge waterfall chart — each fee is a floating bar from the running balance. */
 function Waterfall({ steps }: { steps: WaterfallStep[] }) {
   const balances = steps.map((s) => s.balance)
   const max = Math.max(...balances, steps[0]?.delta ?? 0)
@@ -272,18 +397,16 @@ function Waterfall({ steps }: { steps: WaterfallStep[] }) {
           x1 = toX(0)
           x2 = toX(s.balance)
         } else {
-          // Floating bar between prior balance and new balance.
           x1 = toX(Math.min(prevBalance, s.balance))
           x2 = toX(Math.max(prevBalance, s.balance))
         }
         const barY = y + 3
         const barH = rowH - 11
-        const width = Math.max(1, x2 - x1)
+        const width = Math.max(1.5, x2 - x1)
         const fill = colorFor(s.kind)
 
         const el = (
           <g key={s.key}>
-            {/* Connector guide from previous balance */}
             {isConnector && (
               <line
                 x1={toX(prevBalance)}
@@ -301,22 +424,22 @@ function Waterfall({ steps }: { steps: WaterfallStep[] }) {
               width={width}
               height={barH}
               fill={fill}
-              opacity={s.kind === 'result' || s.kind === 'start' ? 0.85 : 0.6}
+              opacity={s.kind === 'result' || s.kind === 'start' ? 0.9 : 0.65}
               rx={1}
             />
-            <text x={labelW - 6} y={barY + barH / 2 + 3} textAnchor="end" fontSize={8.5} className="fill-muted-foreground uppercase">
+            <text x={labelW - 6} y={barY + barH / 2 + 3} textAnchor="end" fontSize={8.5} className="fill-muted-foreground uppercase font-mono">
               {s.label}
             </text>
             <text
               x={labelW + barArea + 6}
               y={barY + barH / 2 + 3}
               fontSize={8.5}
-              className={`tnum ${
+              className={`tnum font-mono ${
                 s.kind === 'fee' || s.kind === 'risk'
-                  ? 'fill-down'
+                  ? 'fill-down font-medium'
                   : s.kind === 'cost'
-                    ? 'fill-warn'
-                    : 'fill-foreground'
+                    ? 'fill-warn font-medium'
+                    : 'fill-foreground font-semibold'
               }`}
             >
               {s.kind === 'start' || s.kind === 'result' ? usd(s.balance, { compact: true }) : signedUsd(s.delta)}
@@ -342,16 +465,12 @@ function HurdleGauge({ roi, hurdle }: { roi: number; hurdle: number }) {
 
   return (
     <div className="relative h-2.5 rounded-full bg-surface-2">
-      {/* Zero baseline */}
       <div className="absolute inset-y-0 w-px bg-border-strong" style={{ left: `${zeroPos}%` }} />
-      {/* ROI fill */}
       <div
-        className={`absolute inset-y-0 rounded-full ${clears ? 'bg-up/50' : roi >= 0 ? 'bg-warn/50' : 'bg-down/50'}`}
+        className={`absolute inset-y-0 rounded-full ${clears ? 'bg-up/60' : roi >= 0 ? 'bg-warn/60' : 'bg-down/60'}`}
         style={{ left: `${Math.min(zeroPos, roiPos)}%`, width: `${Math.abs(roiPos - zeroPos)}%` }}
       />
-      {/* Hurdle target marker */}
       <div className="absolute -top-0.5 -bottom-0.5 w-0.5 bg-accent" style={{ left: `${hurdlePos}%` }} title="Hurdle" />
-      {/* Active ROI marker */}
       <div
         className={`absolute top-1/2 h-3.5 w-1 -translate-y-1/2 rounded-full ${clears ? 'bg-up' : roi >= 0 ? 'bg-warn' : 'bg-down'}`}
         style={{ left: `calc(${roiPos}% - 2px)` }}
@@ -392,7 +511,7 @@ function Slider({
     <label className="mb-2 block">
       <div className="mb-0.5 flex items-center justify-between text-[10px]">
         <span className="uppercase text-dim">{label}</span>
-        <span className="tnum text-foreground">
+        <span className="tnum font-bold text-foreground">
           {prefix}
           {value.toFixed(step < 1 ? 2 : 0)}
           {suffix}

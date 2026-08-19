@@ -9,6 +9,7 @@
   --color-foreground: var(--foreground);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-panel: var(--panel);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
@@ -25,6 +26,7 @@
   --color-sma7: var(--sma7);
   --color-sma30: var(--sma30);
   --color-forecast: var(--forecast);
+  --color-band: var(--band);
 
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
@@ -36,27 +38,29 @@
 
 :root {
   color-scheme: dark;
-  --background: oklch(0.16 0.012 250);
-  --foreground: oklch(0.9 0.01 240);
-  --surface: oklch(0.19 0.014 250);
-  --surface-2: oklch(0.22 0.016 250);
-  --panel: oklch(0.175 0.013 250);
-  --border: oklch(0.28 0.015 250);
-  --border-strong: oklch(0.36 0.02 250);
-  --muted-foreground: oklch(0.62 0.02 245);
+  --background: oklch(0.135 0.012 250);
+  --foreground: oklch(0.92 0.01 240);
+  --surface: oklch(0.165 0.013 250);
+  --surface-2: oklch(0.20 0.015 250);
+  --surface-3: oklch(0.24 0.018 250);
+  --panel: oklch(0.15 0.012 250);
+  --border: oklch(0.25 0.015 250);
+  --border-strong: oklch(0.34 0.02 250);
+  --muted-foreground: oklch(0.68 0.02 245);
   --dim: oklch(0.48 0.02 245);
 
-  --accent: oklch(0.72 0.13 210);
-  --accent-foreground: oklch(0.16 0.012 250);
+  --accent: oklch(0.74 0.14 205);
+  --accent-foreground: oklch(0.14 0.012 250);
 
-  --up: oklch(0.74 0.17 150);
-  --down: oklch(0.66 0.2 22);
-  --warn: oklch(0.8 0.15 85);
+  --up: oklch(0.76 0.18 150);
+  --down: oklch(0.66 0.22 24);
+  --warn: oklch(0.82 0.16 85);
 
-  --hist: oklch(0.7 0.03 250);
-  --sma7: oklch(0.62 0.17 275);
-  --sma30: oklch(0.5 0.03 250);
-  --forecast: oklch(0.75 0.13 205);
+  --hist: oklch(0.80 0.02 240);
+  --sma7: oklch(0.72 0.18 285);
+  --sma30: oklch(0.55 0.04 250);
+  --forecast: oklch(0.78 0.15 200);
+  --band: oklch(0.65 0.10 230);
 }
 
 @layer base {
@@ -68,19 +72,19 @@
     @apply bg-background;
   }
   body {
-    @apply bg-background text-foreground font-mono antialiased;
-    font-feature-settings: 'tnum' 1, 'zero' 1;
+    @apply bg-background text-foreground font-mono antialiased selection:bg-accent/30 selection:text-accent;
+    font-feature-settings: 'tnum' 1, 'zero' 1, 'ss01' 1;
   }
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
     background: var(--border-strong);
-    border-radius: 4px;
+    border-radius: 2px;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: var(--dim);
@@ -92,15 +96,29 @@
     font-variant-numeric: tabular-nums;
   }
   .grid-scan {
-    background-image: linear-gradient(
-      to bottom,
-      color-mix(in oklch, var(--foreground) 3%, transparent) 0,
-      color-mix(in oklch, var(--foreground) 3%, transparent) 1px,
-      transparent 1px,
-      transparent 2px
-    );
-    background-size: 100% 2px;
+    background-image: 
+      linear-gradient(to bottom, color-mix(in oklch, var(--foreground) 2.5%, transparent) 0, color-mix(in oklch, var(--foreground) 2.5%, transparent) 1px, transparent 1px, transparent 2px),
+      radial-gradient(ellipse at 50% -20%, color-mix(in oklch, var(--accent) 6%, transparent), transparent 70%);
+    background-size: 100% 2px, 100% 100%;
   }
+
+  .led-up {
+    background: radial-gradient(circle at 35% 35%, oklch(0.92 0.1 150), var(--up));
+    box-shadow: 0 0 5px color-mix(in oklch, var(--up) 70%, transparent), inset 0 1px 1px rgba(255, 255, 255, 0.45);
+  }
+  .led-warn {
+    background: radial-gradient(circle at 35% 35%, oklch(0.95 0.1 85), var(--warn));
+    box-shadow: 0 0 5px color-mix(in oklch, var(--warn) 70%, transparent), inset 0 1px 1px rgba(255, 255, 255, 0.45);
+  }
+  .led-down {
+    background: radial-gradient(circle at 35% 35%, oklch(0.88 0.1 24), var(--down));
+    box-shadow: 0 0 5px color-mix(in oklch, var(--down) 70%, transparent), inset 0 1px 1px rgba(255, 255, 255, 0.45);
+  }
+  .led-accent {
+    background: radial-gradient(circle at 35% 35%, oklch(0.95 0.1 205), var(--accent));
+    box-shadow: 0 0 5px color-mix(in oklch, var(--accent) 70%, transparent), inset 0 1px 1px rgba(255, 255, 255, 0.45);
+  }
+
   @keyframes ticker-scroll {
     from {
       transform: translateX(0);
@@ -110,41 +128,18 @@
     }
   }
   .animate-ticker {
-    animation: ticker-scroll 42s linear infinite;
+    animation: ticker-scroll 45s linear infinite;
   }
+
   @keyframes blink {
-    0%,
-    49% {
+    0%, 49% {
       opacity: 1;
     }
-    50%,
-    100% {
-      opacity: 0.25;
+    50%, 100% {
+      opacity: 0.2;
     }
   }
   .animate-blink {
-    animation: blink 1.4s step-end infinite;
-  }
-  @keyframes flash-up {
-    from {
-      background-color: color-mix(in oklch, var(--up) 30%, transparent);
-    }
-    to {
-      background-color: transparent;
-    }
-  }
-  @keyframes flash-down {
-    from {
-      background-color: color-mix(in oklch, var(--down) 30%, transparent);
-    }
-    to {
-      background-color: transparent;
-    }
-  }
-  .flash-up {
-    animation: flash-up 0.6s ease-out;
-  }
-  .flash-down {
-    animation: flash-down 0.6s ease-out;
+    animation: blink 1.2s step-end infinite;
   }
 }

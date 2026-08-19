@@ -1,3 +1,17 @@
+# Exclude build & compiler cache artifacts
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+.next/
+dist/
+
+# Exclude static image / vector assets
+public/
+*.svg
+*.png
+*.jpg
+*.ico
+
+# Exclude raw data & large dumps 
 data/raw/
 AllPrices.json
-*.json
+*.duckdb

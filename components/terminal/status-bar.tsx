@@ -1,15 +1,20 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Search } from 'lucide-react'
+import { BookOpen, Search } from 'lucide-react'
 import { useHealth } from '@/lib/hooks'
 
 interface StatusBarProps {
   onOpenSearch: () => void
+  onOpenDocs: () => void
   mode?: 'NORMAL' | 'BATCH' | 'SEARCH'
 }
 
-export function StatusBar({ onOpenSearch, mode = 'NORMAL' }: StatusBarProps) {
+export function StatusBar({
+  onOpenSearch,
+  onOpenDocs,
+  mode = 'NORMAL',
+}: StatusBarProps) {
   const [clock, setClock] = useState('--:--:--')
   const { data: health } = useHealth()
 
@@ -64,7 +69,19 @@ export function StatusBar({ onOpenSearch, mode = 'NORMAL' }: StatusBarProps) {
         Feed <span className="text-accent">Persistent IPC</span>
       </span>
 
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onOpenDocs}
+          className="flex items-center gap-1.5 rounded-sm border border-accent/40 bg-accent/10 px-2 py-0.5 font-semibold text-accent transition-colors hover:bg-accent/20"
+        >
+          <BookOpen className="h-3 w-3" />
+          <span>Docs</span>
+          <kbd className="rounded-sm border border-accent/30 bg-background/50 px-1 text-[9px]">
+            ?
+          </kbd>
+        </button>
+
         <button
           type="button"
           onClick={onOpenSearch}
@@ -76,13 +93,22 @@ export function StatusBar({ onOpenSearch, mode = 'NORMAL' }: StatusBarProps) {
             ⌘K
           </kbd>
         </button>
+
         <span className="tnum hidden text-muted-foreground md:inline">{clock}</span>
       </div>
     </header>
   )
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone: string }) {
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone: string
+}) {
   return (
     <span className="hidden items-center gap-1 md:flex">
       <span className="text-dim">{label}:</span>
