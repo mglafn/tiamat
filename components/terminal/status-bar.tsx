@@ -1,18 +1,20 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BookOpen, Search } from 'lucide-react'
+import { BookOpen, Cpu, Search } from 'lucide-react'
 import { useHealth } from '@/lib/hooks'
 
 interface StatusBarProps {
   onOpenSearch: () => void
   onOpenDocs: () => void
-  mode?: 'NORMAL' | 'BATCH' | 'SEARCH'
+  onOpenStrategy: () => void
+  mode?: 'NORMAL' | 'BATCH' | 'SEARCH' | 'STRATEGY' | 'DOCS'
 }
 
 export function StatusBar({
   onOpenSearch,
   onOpenDocs,
+  onOpenStrategy,
   mode = 'NORMAL',
 }: StatusBarProps) {
   const [clock, setClock] = useState('--:--:--')
@@ -22,7 +24,7 @@ export function StatusBar({
   const modelReady = health?.model_loaded ?? true
   const isHealthy = health?.status === 'healthy' || !health
 
-  // 1-second interval UTC/Local tick.
+  // 1-second interval UTC/Local tick
   useEffect(() => {
     const tick = () => {
       const d = new Date()
@@ -43,7 +45,11 @@ export function StatusBar({
               ? 'bg-warn text-warn-foreground'
               : mode === 'SEARCH'
                 ? 'bg-accent text-accent-foreground'
-                : 'bg-surface-2 text-foreground'
+                : mode === 'STRATEGY'
+                  ? 'bg-up text-accent-foreground'
+                  : mode === 'DOCS'
+                    ? 'bg-accent/20 text-accent'
+                    : 'bg-surface-2 text-foreground'
           }`}
         >
           {mode}
@@ -70,6 +76,20 @@ export function StatusBar({
       </span>
 
       <div className="ml-auto flex items-center gap-2">
+        {/* Strategy Lab & Backtest Trigger */}
+        <button
+          type="button"
+          onClick={onOpenStrategy}
+          className="flex items-center gap-1.5 rounded-sm border border-up/40 bg-up/10 px-2 py-0.5 font-semibold text-up transition-colors hover:bg-up/20"
+        >
+          <Cpu className="h-3 w-3" />
+          <span>Strategy Lab</span>
+          <kbd className="rounded-sm border border-up/30 bg-background/50 px-1 text-[9px] text-up">
+            B
+          </kbd>
+        </button>
+
+        {/* Methodology & Docs Trigger */}
         <button
           type="button"
           onClick={onOpenDocs}
@@ -82,6 +102,7 @@ export function StatusBar({
           </kbd>
         </button>
 
+        {/* Quick Asset Search Trigger */}
         <button
           type="button"
           onClick={onOpenSearch}

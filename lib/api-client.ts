@@ -1,10 +1,13 @@
 /**
+ * lib/api-client.ts
+ * -----------------
  * HTTP client for the FastAPI backend.
  * Handles timeouts via AbortController and surfaces HTTP status errors to SWR.
  */
 
 import type {
   ArbitrageOpportunity,
+  BacktestResponse,
   CardMarketSummary,
   CardSearchResult,
   CardVariant,
@@ -116,4 +119,29 @@ export const apiClient = {
    */
   getCatalog: () =>
     apiFetch<CatalogCard[]>("/api/v1/catalog"),
+
+  /**
+   * Out-of-time backtest simulation and counterfactual ablation analysis.
+   */
+  getBacktest: (params?: {
+    hurdle?: number
+    tau?: number
+    filter_mode?: string
+    sort_by?: string
+    sizing?: string
+    top_daily?: number
+    is_pro?: boolean
+  }) => {
+    const query = new URLSearchParams()
+    if (params?.hurdle != null) query.set("hurdle", String(params.hurdle))
+    if (params?.tau != null) query.set("tau", String(params.tau))
+    if (params?.filter_mode != null) query.set("filter_mode", params.filter_mode)
+    if (params?.sort_by != null) query.set("sort_by", params.sort_by)
+    if (params?.sizing != null) query.set("sizing", params.sizing)
+    if (params?.top_daily != null) query.set("top_daily", String(params.top_daily))
+    if (params?.is_pro != null) query.set("is_pro", String(params.is_pro))
+
+    const qs = query.toString()
+    return apiFetch<BacktestResponse>(`/api/v1/backtest${qs ? `?${qs}` : ""}`)
+  },
 }

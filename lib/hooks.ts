@@ -17,6 +17,9 @@ import type {
   PriceHistoryPoint,
 } from "./types"
 
+import { mockBacktest } from "./mock-data"
+
+
 export type HealthPayload = HealthCheck & { source: "live" | "mock" }
 
 export function useHealth() {
@@ -26,6 +29,31 @@ export function useHealth() {
     keepPreviousData: true,
   })
 }
+
+export function useBacktest(hurdle = 10.0, tau = 0.90, filterMode = "exp_roi", sizing = "flat") {
+  const { data: health } = useHealth()
+  const isMock = health?.source === "mock" || !health
+
+  return useSWR<BacktestResponse>(
+    [`backtest-run`, hurdle, tau, filterMode, sizing, isMock],
+    async () => {
+      if (isMock) {
+        return mockBacktest(hurdle, tau, filterMode)
+      }
+      try {
+        return await apiClient.getBacktest({ hurdle, tau, filter_mode: filterMode, sizing })
+      } catch {
+        return mockBacktest(hurdle, tau, filterMode)
+      }
+    },
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+      dedupingInterval: 4000,
+    }
+  )
+}
+
 
 export function useArbitrage(minSpread: number, finish: string) {
   const { data, error, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(

@@ -266,6 +266,7 @@ def root():
     return RedirectResponse(url="/docs")
 
 
+
 @app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
     db_alive = False
@@ -283,6 +284,35 @@ def health_check():
         db_connected=db_alive,
         model_loaded=model_artifact is not None
     )
+
+@app.get("/api/v1/backtest", tags=["Analytics"])
+def get_backtest_simulation(
+    hurdle: float = Query(10.0, ge=0.0, le=50.0),
+    tau: Optional[float] = Query(None, ge=0.5, le=0.99),
+    filter_mode: str = Query("exp_roi", regex="^(exp_roi|win_roi|kelly)$"),
+    sort_by: str = Query("exp_roi", regex="^(exp_roi|kelly|dollars|win_roi)$"),
+    sizing: str = Query("flat", regex="^(flat|kelly)$"),
+    top_daily: int = Query(0, ge=0, le=20),
+    is_pro: bool = Query(False)
+):
+    """
+    Executes on-demand out-of-time backtest simulation and counterfactual ablation analysis.
+    """
+    from src.analytics.backtest import run_arbitrage_backtest
+    try:
+        results = run_arbitrage_backtest(
+            min_net_roi_pct=hurdle,
+            tau=tau,
+            sort_by=sort_by,
+            filter_mode=filter_mode,
+            sizing=sizing,
+            top_daily=top_daily,
+            is_pro=is_pro,
+            as_dict=True
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest simulation failed: {str(e)}")
 
 
 @app.get("/api/v1/catalog", response_model=List[CatalogCard], tags=["Catalog"])

@@ -19,3 +19,4 @@ pydantic
 # Developer Utilities & Testing 
 pytest
 black
+rich

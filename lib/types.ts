@@ -92,3 +92,79 @@ export interface CardSearchResult {
   avg_price: number
   vendor_count: number
 }
+
+
+export interface BacktestSummary {
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_capital: number
+  total_net_profit: number
+  portfolio_roi: number
+  avg_trade_roi: number
+  avg_kelly: number
+  profit_factor: number
+  test_start_date: string
+  test_end_date: string
+  test_universe_count: number
+}
+
+export interface BacktestAblation {
+  naive_trades: number
+  naive_win_rate: number
+  naive_capital: number
+  naive_profit: number
+  naive_roi: number
+  alpha_cash: number
+  alpha_roi_bps: number
+  capital_saved: number
+  capital_saved_pct: number
+  vetoed_losses_avoided: number
+}
+
+export interface BacktestTrade {
+  uuid: string
+  name: string
+  set_code: string
+  collector_number?: string | null
+  finish: string
+  price_date: string
+  current_price: number
+  basis: number
+  realized_exit_payout: number
+  actual_future_price: number
+  pred_magnitude: number
+  move_prob: number
+  kelly_fraction: number
+  allocated_units: number
+  total_profit: number
+  net_roi_pct: number
+  is_win: boolean
+  veto_reason?: string | null
+}
+
+export interface BacktestEquityPoint {
+  date: string
+  active_cum_profit: number
+  naive_cum_profit: number
+}
+
+export interface BacktestResponse {
+  status: string
+  params: {
+    min_net_roi_pct: number
+    tau: number
+    filter_mode: string
+    sort_by: string
+    sizing: string
+    top_daily: number
+    is_pro: boolean
+  }
+  summary: BacktestSummary
+  ablation: BacktestAblation
+  equity_curve: BacktestEquityPoint[]
+  top_trades: BacktestTrade[]
+  worst_trades: BacktestTrade[]
+  vetoed_traps: BacktestTrade[]
+}
