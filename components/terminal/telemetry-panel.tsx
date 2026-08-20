@@ -1,11 +1,10 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { AlertTriangle, ChevronRight, Sliders, TrendingUp } from 'lucide-react'
-import { useForecast, useSummary, usePrintings } from '@/lib/hooks'
+import { AlertTriangle, Sliders } from 'lucide-react'
+import { useForecast, useSummary } from '@/lib/hooks'
 import { runEconomics, type EconInputs, type WaterfallStep } from '@/lib/economics'
 import { usd, pct, signedUsd, shortUuid } from '@/lib/format'
-import type { CardVariant } from '@/lib/types'
 
 interface TelemetryPanelProps {
   uuid: string | null
@@ -13,10 +12,9 @@ interface TelemetryPanelProps {
   onSelectUuid?: (uuid: string) => void
 }
 
-export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }: TelemetryPanelProps) {
+export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPanelProps) {
   const { data: summary } = useSummary(uuid)
   const { data: forecast } = useForecast(uuid, 'tcgplayer', selectedFinish)
-  const { printings } = usePrintings(uuid)
 
   const [pro, setPro] = useState(true)
   const [hurdle, setHurdle] = useState(10)
@@ -52,7 +50,6 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
     if (!forecast || forecast.current_price <= 0) return []
     const taxes = [5.0, 7.5, 10.0]
     const kappas = [99.0, 97.0, 95.0]
-
     return taxes.map((t) => {
       return kappas.map((k) => {
         const res = runEconomics({
@@ -199,7 +196,7 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                   </div>
                 )}
 
-                {/* Dead-Zone Fee Cliff Curve Visualization */}
+                {/* Dead-Zone Fee Cliff Warning */}
                 {isDeadZone && (
                   <div className="mx-3 mt-3 rounded-sm border border-warn/40 bg-warn/10 p-2.5 font-mono text-[10px] text-warn">
                     <div className="flex items-center gap-1.5 font-bold uppercase">
@@ -209,7 +206,6 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                     <p className="mt-1 text-[9.5px] leading-relaxed text-dim">
                       Target exit price intersects the fixed $1.12 step-up commission cliff. Payout clamped to $2.49 to eliminate severe marginal drag.
                     </p>
-                    {/* Micro Dead-Zone Curve SVG */}
                     <div className="mt-2 h-9 w-full border-b border-l border-warn/30">
                       <svg viewBox="0 0 100 30" className="h-full w-full overflow-visible">
                         <path
@@ -266,7 +262,7 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                 </div>
 
                 {/* Interactive Scenario Assumptions */}
-                <div className="border-b border-border/60 p-3 font-mono">
+                <div className="p-3 font-mono">
                   <div className="mb-2.5 flex items-center justify-between text-[10px] uppercase text-dim">
                     <span className="flex items-center gap-1">
                       <Sliders className="h-3 w-3 text-accent" />
@@ -305,48 +301,6 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal', onSelectUuid }
                 </div>
               </>
             )}
-
-            {/* Printings & Variant Switcher */}
-            {printings.length > 0 && (
-              <div className="p-3 font-mono">
-                <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase text-dim">
-                  <span>Tracked Set Printings</span>
-                  <span className="tnum">{printings.length} variants</span>
-                </div>
-                <div className="max-h-40 divide-y divide-border/40 overflow-y-auto rounded-sm border border-border bg-surface/60">
-                  {printings.map((p: CardVariant, i: number) => {
-                    const isActive = p.uuid === uuid
-                    const hasPrice = p.floor_price != null && p.floor_price > 0
-                    return (
-                      <button
-                        key={`${p.uuid}-${p.set_code}-${i}`}
-                        type="button"
-                        onClick={() => onSelectUuid?.(p.uuid)}
-                        className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-[11px] transition-all ${
-                          isActive
-                            ? 'border-l-2 border-accent bg-accent/20 font-semibold text-accent'
-                            : hasPrice
-                              ? 'text-foreground hover:bg-surface-2'
-                              : 'text-dim opacity-50 hover:bg-surface-2/40 hover:opacity-90'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 truncate">
-                          <span className="font-mono text-[10px] text-dim">{p.collector_number ? `#${p.collector_number}` : '—'}</span>
-                          <span className="font-semibold">{p.set_code}</span>
-                        </div>
-                        {hasPrice ? (
-                          <span className="tnum font-mono text-[11px] font-medium text-foreground">{usd(p.floor_price, { compact: true })}</span>
-                        ) : (
-                          <span className="rounded-sm border border-border/60 bg-surface-2 px-1 py-0.5 font-mono text-[9px] uppercase tracking-wider text-dim">
-                            UNQUOTED
-                          </span>
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>
@@ -359,7 +313,6 @@ function Waterfall({ steps }: { steps: WaterfallStep[] }) {
   const max = Math.max(...balances, steps[0]?.delta ?? 0)
   const min = 0
   const range = Math.max(0.01, max - min)
-
   const rowH = 24
   const labelW = 118
   const barArea = 168
@@ -390,9 +343,9 @@ function Waterfall({ steps }: { steps: WaterfallStep[] }) {
       {steps.map((s, i) => {
         const y = i * rowH + 4
         const isConnector = s.kind !== 'start' && s.kind !== 'result'
-
         let x1: number
         let x2: number
+
         if (s.kind === 'start' || s.kind === 'result') {
           x1 = toX(0)
           x2 = toX(s.balance)
@@ -400,6 +353,7 @@ function Waterfall({ steps }: { steps: WaterfallStep[] }) {
           x1 = toX(Math.min(prevBalance, s.balance))
           x2 = toX(Math.max(prevBalance, s.balance))
         }
+
         const barY = y + 3
         const barH = rowH - 11
         const width = Math.max(1.5, x2 - x1)
@@ -458,6 +412,7 @@ function HurdleGauge({ roi, hurdle }: { roi: number; hurdle: number }) {
   const hi = Math.max(hurdle + 10, roi + 5, 20)
   const range = hi - lo
   const posOf = (v: number) => Math.min(100, Math.max(0, ((v - lo) / range) * 100))
+
   const roiPos = posOf(roi)
   const hurdlePos = posOf(hurdle)
   const zeroPos = posOf(0)
