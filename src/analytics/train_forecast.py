@@ -1,14 +1,3 @@
-"""
-Two-Stage Hurdle XGBoost Forecasting Model for secondary MTG singles.
-
-Architecture:
-  - Stage 1: XGBClassifier predicting breakout probability P(|delta| >= 4.5%).
-  - Stage 2: XGBRegressor (L1 loss) estimating return magnitude conditional on being a mover.
-  - Partitions: Strict chronological train/val/test splits with 14-day embargoes
-    to prevent target leakage across the 7-14 day label horizon.
-  - Calibration: Probability threshold (tau) is tuned strictly on the validation set.
-"""
-
 import os
 import sys
 from pathlib import Path
@@ -26,14 +15,16 @@ MODEL_DIR = BASE_DIR / "models"
 
 def train_xgboost_forecast(db_path: str, model_output_dir: str):
     print(f"Training two-stage forecast model against: {db_path}")
-
     if not Path(db_path).exists():
         raise FileNotFoundError(f"Database not found at '{db_path}'. Run ETL & feature pipeline first.")
 
     # 1. Load dataset (filter bulk penny cards <$2.50 to avoid zero-inflation noise)
-    conn = duckdb.connect(db_path, read_only=True)
+    conn = duckdb.connect(db_path, read_only=True, config={
+        'max_memory': '2GB',
+        'threads': '4'
+    })
     query = """
-        SELECT 
+        SELECT
             price_date,
             sma_ratio,
             volatility_14d,
@@ -52,7 +43,7 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
             rarity_score,
             target_return_7d_pct
         FROM fact_training_dataset
-        WHERE target_return_7d_pct IS NOT NULL 
+        WHERE target_return_7d_pct IS NOT NULL
           AND current_price >= 2.50
           AND target_return_7d_pct BETWEEN -50.0 AND 150.0
     """
@@ -61,7 +52,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
 
     if len(df) == 0:
         raise ValueError("Training dataset is empty. Check fact_training_dataset in DuckDB.")
-
     print(f"Loaded {len(df):,} training instances.")
 
     # 2. Chronological split with 14-day anti-leakage embargoes
@@ -98,7 +88,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     min_date = df['price_date'].min()
     max_date = df['price_date'].max()
     total_days = (max_date - min_date).days
-
     EMBARGO_DAYS = 14
 
     if total_days < (EMBARGO_DAYS * 2 + 10):
@@ -118,7 +107,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         remaining_days = max(1, total_days - (2 * EMBARGO_DAYS))
         train_days = int(remaining_days * 0.60)
         val_days = int(remaining_days * 0.20)
-        
         train_cutoff_date = min_date + pd.Timedelta(days=train_days)
         val_start_date = train_cutoff_date + pd.Timedelta(days=EMBARGO_DAYS)
         val_end_date = val_start_date + pd.Timedelta(days=val_days)
@@ -142,7 +130,7 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
         raise ValueError("Empty split encountered. Check date distributions in fact_training_dataset.")
 
-    # 3. Model Training
+    # 3. Model Training with Hist Tree Method and bounded threads
     HURDLE_PCT = 4.50
     y_train_class = (np.abs(y_train) >= HURDLE_PCT).astype(int)
     y_val_class = (np.abs(y_val) >= HURDLE_PCT).astype(int)
@@ -161,8 +149,9 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         subsample=0.85,
         colsample_bytree=0.80,
         scale_pos_weight=scale_weight,
+        tree_method='hist',
         random_state=42,
-        n_jobs=-1,
+        n_jobs=4,
         eval_metric='logloss'
     )
     classifier.fit(X_train, y_train_class)
@@ -181,8 +170,9 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         colsample_bytree=0.80,
         reg_alpha=2.0,
         reg_lambda=2.0,
+        tree_method='hist',
         random_state=42,
-        n_jobs=-1,
+        n_jobs=4,
         objective='reg:absoluteerror'
     )
     if len(X_train_movers) > 0:
@@ -195,13 +185,14 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     raw_val_probs = classifier.predict_proba(X_val)[:, 1]
     raw_val_mags = regressor.predict(X_val)
 
-    naive_val_mae = mean_absolute_error(y_val, np.zeros_like(y_val))
+    y_val_arr = y_val.to_numpy()
+    naive_val_mae = mean_absolute_error(y_val_arr, np.zeros_like(y_val_arr))
     best_mae = naive_val_mae
-    best_prob_thresh = 1.01  # Safe default: predict 0 if model doesn't beat naive zero baseline
+    best_prob_thresh = 1.01
 
     for candidate in np.linspace(0.10, 0.95, 86):
         filtered_preds = np.where(raw_val_probs >= candidate, raw_val_mags, 0.0)
-        candidate_mae = mean_absolute_error(y_val, filtered_preds)
+        candidate_mae = mean_absolute_error(y_val_arr, filtered_preds)
         if candidate_mae < best_mae:
             best_mae = candidate_mae
             best_prob_thresh = candidate
@@ -214,25 +205,24 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     # 5. Evaluate on out-of-time blind test set
     test_probs = classifier.predict_proba(X_test)[:, 1]
     test_mags = regressor.predict(X_test)
-    
-    naive_predictions = np.zeros_like(y_test)
-    naive_mae = mean_absolute_error(y_test, naive_predictions)
+    y_test_arr = y_test.to_numpy()
+    naive_predictions = np.zeros_like(y_test_arr)
+    naive_mae = mean_absolute_error(y_test_arr, naive_predictions)
 
     if best_prob_thresh <= 1.0:
         predictions = np.where(test_probs >= best_prob_thresh, test_mags, 0.0)
     else:
-        predictions = np.zeros_like(y_test)
+        predictions = np.zeros_like(y_test_arr)
 
-    mae = mean_absolute_error(y_test, predictions)
-    rmse = np.sqrt(mean_squared_error(y_test, predictions))
+    mae = mean_absolute_error(y_test_arr, predictions)
+    rmse = np.sqrt(mean_squared_error(y_test_arr, predictions))
 
     active_mask = predictions != 0.0
     total_active_trades = int(active_mask.sum())
-
     if total_active_trades > 0:
-        actual_signs = np.sign(y_test[active_mask])
+        actual_signs = np.sign(y_test_arr[active_mask])
         pred_signs = np.sign(predictions[active_mask])
-        correct_trades = (actual_signs == pred_signs) & (y_test[active_mask] != 0.0)
+        correct_trades = (actual_signs == pred_signs) & (y_test_arr[active_mask] != 0.0)
         directional_accuracy = float(correct_trades.mean() * 100.0)
     else:
         directional_accuracy = 0.0
@@ -254,7 +244,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     # 6. Save model artifact
     os.makedirs(model_output_dir, exist_ok=True)
     model_path = os.path.join(model_output_dir, "xgboost_forecast.joblib")
-
     artifact = {
         "classifier": classifier,
         "regressor": regressor,
@@ -270,7 +259,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
             "split_date": str(test_start_date.date())
         }
     }
-
     joblib.dump(artifact, model_path)
     print(f"Saved artifact to: {model_path}\n")
 

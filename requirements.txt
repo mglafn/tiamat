@@ -3,6 +3,7 @@ ijson
 pandas
 numpy
 duckdb
+tqdm
 python-dotenv
 requests
 

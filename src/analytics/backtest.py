@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-src/analytics/backtest.py
--------------------------
-Quantitative out-of-time backtesting engine for secondary MTG arbitrage and
-momentum strategies.
-"""
-
 import sys
 import argparse
 from pathlib import Path
@@ -24,6 +16,7 @@ try:
 except ImportError:
     HAS_RICH = False
 
+
 def find_repo_root() -> Path:
     current = Path(__file__).resolve().parent
     for p in [current, current.parent, current.parent.parent]:
@@ -31,36 +24,32 @@ def find_repo_root() -> Path:
             return p
     return current.parent.parent
 
+
 BASE_DIR = find_repo_root()
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
 
 def calculate_direct_payout_series(
-    prices: pd.Series, 
-    tax_rate: float = 0.075, 
+    prices: pd.Series,
+    tax_rate: float = 0.075,
     clamp_dead_zone: bool = True,
     is_pro: bool = False
 ) -> pd.Series:
     p = prices.copy().astype(float)
     if clamp_dead_zone:
         p = np.where((p >= 2.50) & (p <= 2.67), 2.49, p)
-
     sub_tier_fee = np.round(p * 0.50, 2)
     sub_tier_payout = p - sub_tier_fee
-
     commission = np.minimum(p * 0.0895, 75.00)
     pro_fee = np.minimum(p * 0.025, 75.00) if is_pro else 0.0
-    
     gross_total = p * (1.0 + tax_rate)
     processing = gross_total * 0.025
-    
     standard_fee = np.round(1.12 + commission + pro_fee + processing, 2)
     standard_payout = p - standard_fee
-
     payout = np.where(
-        p < 0.40, 
-        0.0, 
+        p < 0.40,
+        0.0,
         np.where(p < 2.50, sub_tier_payout, standard_payout)
     )
     return np.maximum(0.0, payout)
@@ -76,7 +65,6 @@ def calculate_condition_risk_haircut(
     safe_direct = np.maximum(0.40, direct_price)
     downgrade_penalty = (safe_direct - (salvage_factor * acq_cost)) / safe_direct
     reject_penalty = safe_direct / safe_direct
-    
     kappa_risk = 1.0 - (downgrade_rate * np.maximum(0.0, downgrade_penalty) + reject_rate * reject_penalty)
     return np.clip(kappa_risk, 0.80, 1.00)
 
@@ -84,22 +72,18 @@ def calculate_condition_risk_haircut(
 def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd.DataFrame:
     if len(df) == 0:
         return df
-
     out = df.copy()
     if sizing == "kelly":
         out['allocated_units'] = np.maximum(1.0, np.round(out['kelly_fraction'] * 10.0 * 0.5))
     else:
         out['allocated_units'] = 1.0
-
     out['actual_future_price'] = out['current_price'] * (1.0 + out['target_return_7d_pct'] / 100.0)
     raw_realized_payout = calculate_direct_payout_series(out['actual_future_price'], clamp_dead_zone=True, is_pro=is_pro)
     realized_kappa = calculate_condition_risk_haircut(out['actual_future_price'], out['basis'])
-    
     out['realized_exit_payout'] = raw_realized_payout * realized_kappa
     out['unit_profit'] = out['realized_exit_payout'] - out['basis']
     out['net_roi_pct'] = (out['unit_profit'] / out['basis']) * 100.0
     out['is_win'] = out['unit_profit'] > 0
-
     out['total_cost'] = out['basis'] * out['allocated_units']
     out['total_profit'] = out['unit_profit'] * out['allocated_units']
     return out
@@ -133,9 +117,12 @@ def run_arbitrage_backtest(
     prob_threshold = tau if tau is not None else metrics.get("prob_threshold", 0.90)
     persisted_split_date = metrics.get("split_date", None)
 
-    conn = duckdb.connect(str(db_path), read_only=True)
+    conn = duckdb.connect(str(db_path), read_only=True, config={
+        'max_memory': '1.5GB',
+        'threads': '2'
+    })
     query = """
-        SELECT 
+        SELECT
             t.uuid, t.finish, t.price_date, t.current_price, t.target_return_7d_pct,
             t.sma_ratio, t.volatility_14d, t.daily_return_pct, t.velocity_7d_pct,
             t.bid_ask_spread_pct, t.spread_velocity_7d, t.vendor_delta_7d,
@@ -159,7 +146,6 @@ def run_arbitrage_backtest(
         return
 
     df['price_date'] = pd.to_datetime(df['price_date'])
-
     if persisted_split_date:
         test_start_date = pd.to_datetime(persisted_split_date)
     else:
@@ -168,7 +154,6 @@ def run_arbitrage_backtest(
 
     test_df = df[df['price_date'] >= test_start_date].copy().reset_index(drop=True)
     total_test_universe = len(test_df)
-
     if total_test_universe == 0:
         if as_dict:
             return {"status": "empty", "message": f"No records >= {test_start_date.date()}"}
@@ -204,7 +189,6 @@ def run_arbitrage_backtest(
     p = test_df['move_prob']
     test_df['exp_net_profit'] = (p * test_df['profit_win']) + ((1.0 - p) * test_df['profit_fail'])
     test_df['exp_net_roi_pct'] = (test_df['exp_net_profit'] / test_df['basis']) * 100.0
-
     b = np.maximum(0.001, test_df['roi_win_pct'] / 100.0)
     a = np.maximum(0.001, np.abs(test_df['loss_fail_pct']) / 100.0)
     test_df['kelly_fraction'] = np.clip((p * b - (1.0 - p) * a) / (a * b), 0.0, 1.0)
@@ -240,15 +224,14 @@ def run_arbitrage_backtest(
             .reset_index(drop=True)
         )
 
-    # Settlement
     buy_signals = evaluate_dataframe_trades(buy_signals, is_pro, sizing)
     naive_signals = evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat")
 
-    # Metrics calculation
     total_trades = len(buy_signals)
     win_trades = int(buy_signals['is_win'].sum()) if total_trades > 0 else 0
     loss_trades = total_trades - win_trades
     win_rate = (win_trades / total_trades) * 100.0 if total_trades > 0 else 0.0
+
     total_capital = float(buy_signals['total_cost'].sum()) if total_trades > 0 else 0.0
     total_net_profit = float(buy_signals['total_profit'].sum()) if total_trades > 0 else 0.0
     portfolio_roi = (total_net_profit / total_capital) * 100.0 if total_capital > 0 else 0.0
@@ -259,7 +242,6 @@ def run_arbitrage_backtest(
     gross_losses = float(abs(buy_signals[buy_signals['total_profit'] < 0]['total_profit'].sum())) if total_trades > 0 else 0.0
     profit_factor = (gross_gains / gross_losses) if gross_losses > 0 else (999.0 if gross_gains > 0 else 0.0)
 
-    # Ablation
     active_uuids = set(zip(buy_signals['uuid'], buy_signals['price_date'].dt.strftime('%Y-%m-%d'), buy_signals['finish'])) if total_trades > 0 else set()
     vetoed_trades = naive_signals[
         ~naive_signals.apply(lambda r: (r['uuid'], r['price_date'].strftime('%Y-%m-%d'), r['finish']) in active_uuids, axis=1)
@@ -281,13 +263,13 @@ def run_arbitrage_backtest(
     naive_prof = float(naive_signals['total_profit'].sum()) if len(naive_signals) > 0 else 0.0
     naive_roi = (naive_prof / naive_cap * 100.0) if naive_cap > 0 else 0.0
     naive_win_rate = (int(naive_signals['is_win'].sum()) / len(naive_signals) * 100.0) if len(naive_signals) > 0 else 0.0
+
     alpha_cash = total_net_profit - naive_prof
     alpha_roi_bps = (portfolio_roi - naive_roi) * 100.0
     capital_saved = naive_cap - total_capital
     capital_saved_pct = (capital_saved / naive_cap * 100.0) if naive_cap > 0 else 0.0
     vetoed_losses = float(abs(vetoed_trades[vetoed_trades['total_profit'] < 0]['total_profit'].sum())) if len(vetoed_trades) > 0 else 0.0
 
-    # Daily cumulative equity curve
     all_dates = sorted(list(set(test_df['price_date'].dt.strftime('%Y-%m-%d'))))
     active_by_date = buy_signals.groupby(buy_signals['price_date'].dt.strftime('%Y-%m-%d'))['total_profit'].sum().to_dict() if total_trades > 0 else {}
     naive_by_date = naive_signals.groupby(naive_signals['price_date'].dt.strftime('%Y-%m-%d'))['total_profit'].sum().to_dict() if len(naive_signals) > 0 else {}
@@ -374,9 +356,33 @@ def run_arbitrage_backtest(
         "worst_trades": sanitize_trade_records(buy_signals[buy_signals['total_profit'] < 0].sort_values(by='total_profit', ascending=True).head(5)),
         "vetoed_traps": sanitize_trade_records(vetoed_trades.sort_values(by='total_profit', ascending=True).head(8))
     }
-
     if as_dict:
         return payload
-
-    # CLI Terminal Render fallback
     print(f"\nBacktest Complete: {total_trades} trades executed. PnL: ${total_net_profit:+.2f} ({portfolio_roi:+.2f}% ROI).")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tau", "-t", type=float, default=None)
+    parser.add_argument("--hurdle", type=float, default=10.0)
+    parser.add_argument("--filter", choices=["exp_roi", "win_roi", "kelly"], default="exp_roi")
+    parser.add_argument("--sort", choices=["exp_roi", "kelly", "dollars", "win_roi"], default="exp_roi")
+    parser.add_argument("--sizing", choices=["flat", "kelly"], default="flat")
+    parser.add_argument("--top-daily", type=int, default=0)
+    parser.add_argument("--pro", action="store_true")
+    args = parser.parse_args()
+
+    run_arbitrage_backtest(
+        min_net_roi_pct=args.hurdle,
+        tau=args.tau,
+        filter_mode=args.filter,
+        sort_by=args.sort,
+        sizing=args.sizing,
+        top_daily=args.top_daily,
+        is_pro=args.pro,
+        as_dict=False
+    )
+
+
+if __name__ == "__main__":
+    main()
