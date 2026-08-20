@@ -1,7 +1,3 @@
-/**
- * SWR hooks wrapping API endpoints with background polling and deduplication.
- */
-
 "use client"
 
 import useSWR from "swr"
@@ -17,9 +13,6 @@ import type {
   PriceHistoryPoint,
 } from "./types"
 
-import { mockBacktest } from "./mock-data"
-
-
 export type HealthPayload = HealthCheck & { source: "live" | "mock" }
 
 export function useHealth() {
@@ -29,31 +22,6 @@ export function useHealth() {
     keepPreviousData: true,
   })
 }
-
-export function useBacktest(hurdle = 10.0, tau = 0.90, filterMode = "exp_roi", sizing = "flat") {
-  const { data: health } = useHealth()
-  const isMock = health?.source === "mock" || !health
-
-  return useSWR<BacktestResponse>(
-    [`backtest-run`, hurdle, tau, filterMode, sizing, isMock],
-    async () => {
-      if (isMock) {
-        return mockBacktest(hurdle, tau, filterMode)
-      }
-      try {
-        return await apiClient.getBacktest({ hurdle, tau, filter_mode: filterMode, sizing })
-      } catch {
-        return mockBacktest(hurdle, tau, filterMode)
-      }
-    },
-    {
-      revalidateOnFocus: false,
-      keepPreviousData: true,
-      dedupingInterval: 4000,
-    }
-  )
-}
-
 
 export function useArbitrage(minSpread: number, finish: string) {
   const { data, error, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(
@@ -69,11 +37,9 @@ export function useArbitrage(minSpread: number, finish: string) {
 
   const rawRows: ArbitrageOpportunity[] = data ?? []
   const filtered = rawRows.filter((r: ArbitrageOpportunity) => finish === "all" || r.finish === finish)
-  
-  // Deduplicate composite key (uuid + finish) in case multiple vendors return identical entries
   const seen = new Set<string>()
   const rows: ArbitrageOpportunity[] = []
-  
+
   for (const r of filtered) {
     const key = `${r.uuid}-${r.finish}`
     if (!seen.has(key)) {
@@ -86,9 +52,9 @@ export function useArbitrage(minSpread: number, finish: string) {
 }
 
 export function useHistory(
-  uuid: string | null, 
-  vendor: string = "tcgplayer", 
-  finish: string = "normal", 
+  uuid: string | null,
+  vendor: string = "tcgplayer",
+  finish: string = "normal",
   days: number = 60
 ) {
   return useSWR<PriceHistoryPoint[]>(
@@ -135,6 +101,7 @@ export function usePrintings(uuid: string | null) {
       keepPreviousData: true,
     }
   )
+
   return { printings: data ?? [], error, isLoading }
 }
 
@@ -151,14 +118,14 @@ export function useSearch(query: string) {
 
 export function useCatalog() {
   const { data } = useSWR<CatalogCard[] | { source: string; cards: CatalogCard[] }>(
-    "catalog-map", 
-    () => apiClient.getCatalog(), 
+    "catalog-map",
+    () => apiClient.getCatalog(),
     {
       revalidateOnFocus: false,
       keepPreviousData: true,
     }
   )
-  
+
   const map = new Map<string, CatalogCard>()
   const list = Array.isArray(data) ? data : (data?.cards ?? [])
   for (const c of list) map.set(c.uuid, c)

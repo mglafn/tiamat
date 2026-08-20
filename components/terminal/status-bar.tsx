@@ -1,30 +1,26 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BookOpen, Cpu, Search } from 'lucide-react'
+import { BookOpen, Search } from 'lucide-react'
 import { useHealth } from '@/lib/hooks'
 
 interface StatusBarProps {
   onOpenSearch: () => void
   onOpenDocs: () => void
-  onOpenStrategy: () => void
-  mode?: 'NORMAL' | 'BATCH' | 'SEARCH' | 'STRATEGY' | 'DOCS'
+  mode?: 'NORMAL' | 'BATCH' | 'SEARCH' | 'DOCS'
 }
 
 export function StatusBar({
   onOpenSearch,
   onOpenDocs,
-  onOpenStrategy,
   mode = 'NORMAL',
 }: StatusBarProps) {
   const [clock, setClock] = useState('--:--:--')
   const { data: health } = useHealth()
-
   const dbConnected = health?.db_connected ?? true
   const modelReady = health?.model_loaded ?? true
   const isHealthy = health?.status === 'healthy' || !health
 
-  // 1-second interval UTC/Local tick
   useEffect(() => {
     const tick = () => {
       const d = new Date()
@@ -37,7 +33,6 @@ export function StatusBar({
 
   return (
     <header className="flex h-8 shrink-0 items-center gap-3 border-b border-border-strong bg-surface px-3 text-[10px] uppercase tracking-wide">
-      {/* Terminal execution mode badge */}
       <div className="flex items-center gap-1.5">
         <span
           className={`rounded-[1px] px-1.5 py-0.5 font-bold tracking-wider ${
@@ -45,11 +40,9 @@ export function StatusBar({
               ? 'bg-warn text-warn-foreground'
               : mode === 'SEARCH'
                 ? 'bg-accent text-accent-foreground'
-                : mode === 'STRATEGY'
-                  ? 'bg-up text-accent-foreground'
-                  : mode === 'DOCS'
-                    ? 'bg-accent/20 text-accent'
-                    : 'bg-surface-2 text-foreground'
+                : mode === 'DOCS'
+                  ? 'bg-accent/20 text-accent'
+                  : 'bg-surface-2 text-foreground'
           }`}
         >
           {mode}
@@ -70,26 +63,11 @@ export function StatusBar({
         value={modelReady ? 'Online' : 'Unloaded'}
         tone={modelReady ? 'text-up' : 'text-warn'}
       />
-
       <span className="hidden text-dim sm:inline">
         Feed <span className="text-accent">Persistent IPC</span>
       </span>
 
       <div className="ml-auto flex items-center gap-2">
-        {/* Strategy Lab & Backtest Trigger */}
-        <button
-          type="button"
-          onClick={onOpenStrategy}
-          className="flex items-center gap-1.5 rounded-sm border border-up/40 bg-up/10 px-2 py-0.5 font-semibold text-up transition-colors hover:bg-up/20"
-        >
-          <Cpu className="h-3 w-3" />
-          <span>Strategy Lab</span>
-          <kbd className="rounded-sm border border-up/30 bg-background/50 px-1 text-[9px] text-up">
-            B
-          </kbd>
-        </button>
-
-        {/* Methodology & Docs Trigger */}
         <button
           type="button"
           onClick={onOpenDocs}
@@ -102,7 +80,6 @@ export function StatusBar({
           </kbd>
         </button>
 
-        {/* Quick Asset Search Trigger */}
         <button
           type="button"
           onClick={onOpenSearch}
