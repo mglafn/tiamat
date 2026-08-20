@@ -8,13 +8,33 @@ import joblib
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+    HAS_RICH = True
+    console = Console()
+except ImportError:
+    HAS_RICH = False
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_DIR = BASE_DIR / "models"
 
 
 def train_xgboost_forecast(db_path: str, model_output_dir: str):
-    print(f"Training two-stage forecast model against: {db_path}")
+    if HAS_RICH:
+        console.print(Panel(
+            "[bold white]XGBoost Two-Stage Price Forecasting Pipeline[/bold white]\n"
+            f"[dim]Training Store: {db_path}[/dim]",
+            box=box.ROUNDED,
+            border_style="cyan"
+        ))
+    else:
+        print(f"Training two-stage forecast model against: {db_path}")
+
     if not Path(db_path).exists():
         raise FileNotFoundError(f"Database not found at '{db_path}'. Run ETL & feature pipeline first.")
 
@@ -52,12 +72,15 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
 
     if len(df) == 0:
         raise ValueError("Training dataset is empty. Check fact_training_dataset in DuckDB.")
-    print(f"Loaded {len(df):,} training instances.")
+
+    if HAS_RICH:
+        console.print(f"[bold cyan]→ Loaded dataset:[/bold cyan] [bold white]{len(df):,}[/bold white] training instances\n")
+    else:
+        print(f"Loaded {len(df):,} training instances.")
 
     # 2. Chronological split with 14-day anti-leakage embargoes
     df['price_date'] = pd.to_datetime(df['price_date'])
     df = df.sort_values('price_date').reset_index(drop=True)
-
     feature_cols = [
         'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
         'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
@@ -65,7 +88,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
     ]
     target_col = 'target_return_7d_pct'
-
     fill_defaults = {
         'sma_ratio': 1.0,
         'volatility_14d': 0.0,
@@ -89,7 +111,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     max_date = df['price_date'].max()
     total_days = (max_date - min_date).days
     EMBARGO_DAYS = 14
-
     if total_days < (EMBARGO_DAYS * 2 + 10):
         raise ValueError(
             f"Insufficient date range ({total_days} days). Need at least {EMBARGO_DAYS * 2 + 10} days for embargoes."
@@ -123,14 +144,32 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     X_val, y_val = X.loc[val_mask], y.loc[val_mask]
     X_test, y_test = X.loc[test_mask], y.loc[test_mask]
 
-    print(f"Train split : <= {train_cutoff_date.date()} ({len(X_train):,} rows)")
-    print(f"Val split   : {val_start_date.date()} to {val_end_date.date()} ({len(X_val):,} rows, 14d embargo)")
-    print(f"Test split  : >= {test_start_date.date()} ({len(X_test):,} rows, 14d embargo)")
+    if HAS_RICH:
+        split_table = Table(
+            title="[bold white]TEMPORAL ANTI-LEAKAGE EMBARGO PARTITIONS[/bold white]",
+            box=box.ROUNDED,
+            border_style="bright_black",
+            show_header=True,
+            header_style="bold cyan"
+        )
+        split_table.add_column("Partition", style="bold white")
+        split_table.add_column("Date Range", style="dim")
+        split_table.add_column("Rows", justify="right", style="cyan")
+        split_table.add_column("Embargo Guard", justify="center", style="bold green")
+        split_table.add_row("Training", f"<= {train_cutoff_date.date()}", f"{len(X_train):,}", "Primary")
+        split_table.add_row("Validation", f"{val_start_date.date()} → {val_end_date.date()}", f"{len(X_val):,}", "14d Anti-Leakage")
+        split_table.add_row("Out-Of-Time Test", f">= {test_start_date.date()}", f"{len(X_test):,}", "14d Anti-Leakage")
+        console.print(split_table)
+        console.print()
+    else:
+        print(f"Train split : <= {train_cutoff_date.date()} ({len(X_train):,} rows)")
+        print(f"Val split   : {val_start_date.date()} to {val_end_date.date()} ({len(X_val):,} rows, 14d embargo)")
+        print(f"Test split  : >= {test_start_date.date()} ({len(X_test):,} rows, 14d embargo)")
 
     if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
         raise ValueError("Empty split encountered. Check date distributions in fact_training_dataset.")
 
-    # 3. Model Training with Hist Tree Method and bounded threads
+    # 3. Model Training
     HURDLE_PCT = 4.50
     y_train_class = (np.abs(y_train) >= HURDLE_PCT).astype(int)
     y_val_class = (np.abs(y_val) >= HURDLE_PCT).astype(int)
@@ -140,51 +179,89 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     neg_count = len(y_train_class) - pos_count
     scale_weight = (neg_count / pos_count) if pos_count > 0 else 1.0
 
-    print("Fitting Stage 1 classifier (mover detection)...")
-    classifier = XGBClassifier(
-        n_estimators=300,
-        learning_rate=0.04,
-        max_depth=6,
-        gamma=0.5,
-        subsample=0.85,
-        colsample_bytree=0.80,
-        scale_pos_weight=scale_weight,
-        tree_method='hist',
-        random_state=42,
-        n_jobs=4,
-        eval_metric='logloss'
-    )
-    classifier.fit(X_train, y_train_class)
+    if HAS_RICH:
+        with console.status("[bold cyan]Fitting Stage 1 Classifier (Breakout Mover Detection)...[/bold cyan]"):
+            classifier = XGBClassifier(
+                n_estimators=300,
+                learning_rate=0.04,
+                max_depth=6,
+                gamma=0.5,
+                subsample=0.85,
+                colsample_bytree=0.80,
+                scale_pos_weight=scale_weight,
+                tree_method='hist',
+                random_state=42,
+                n_jobs=4,
+                eval_metric='logloss'
+            )
+            classifier.fit(X_train, y_train_class)
+        console.print("  [bold green]✓ Stage 1 Fitted:[/bold green] XGBClassifier (scale_pos_weight: {:.2f})".format(scale_weight))
 
-    print("Fitting Stage 2 regressor (magnitude conditional on mover)...")
-    movers_mask = y_train_class == 1
-    X_train_movers = X_train.loc[movers_mask]
-    y_train_movers = y_train.loc[movers_mask]
-
-    regressor = XGBRegressor(
-        n_estimators=300,
-        learning_rate=0.03,
-        max_depth=5,
-        gamma=0.5,
-        subsample=0.85,
-        colsample_bytree=0.80,
-        reg_alpha=2.0,
-        reg_lambda=2.0,
-        tree_method='hist',
-        random_state=42,
-        n_jobs=4,
-        objective='reg:absoluteerror'
-    )
-    if len(X_train_movers) > 0:
-        regressor.fit(X_train_movers, y_train_movers)
+        with console.status("[bold cyan]Fitting Stage 2 Regressor (Magnitude Conditional on Breakout)...[/bold cyan]"):
+            movers_mask = y_train_class == 1
+            X_train_movers = X_train.loc[movers_mask]
+            y_train_movers = y_train.loc[movers_mask]
+            regressor = XGBRegressor(
+                n_estimators=300,
+                learning_rate=0.03,
+                max_depth=5,
+                gamma=0.5,
+                subsample=0.85,
+                colsample_bytree=0.80,
+                reg_alpha=2.0,
+                reg_lambda=2.0,
+                tree_method='hist',
+                random_state=42,
+                n_jobs=4,
+                objective='reg:absoluteerror'
+            )
+            if len(X_train_movers) > 0:
+                regressor.fit(X_train_movers, y_train_movers)
+            else:
+                regressor.fit(X_train, y_train)
+        console.print("  [bold green]✓ Stage 2 Fitted:[/bold green] XGBRegressor (Objective: reg:absoluteerror)\n")
     else:
-        regressor.fit(X_train, y_train)
+        print("Fitting Stage 1 classifier (mover detection)...")
+        classifier = XGBClassifier(
+            n_estimators=300,
+            learning_rate=0.04,
+            max_depth=6,
+            gamma=0.5,
+            subsample=0.85,
+            colsample_bytree=0.80,
+            scale_pos_weight=scale_weight,
+            tree_method='hist',
+            random_state=42,
+            n_jobs=4,
+            eval_metric='logloss'
+        )
+        classifier.fit(X_train, y_train_class)
+        print("Fitting Stage 2 regressor (magnitude conditional on mover)...")
+        movers_mask = y_train_class == 1
+        X_train_movers = X_train.loc[movers_mask]
+        y_train_movers = y_train.loc[movers_mask]
+        regressor = XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.03,
+            max_depth=5,
+            gamma=0.5,
+            subsample=0.85,
+            colsample_bytree=0.80,
+            reg_alpha=2.0,
+            reg_lambda=2.0,
+            tree_method='hist',
+            random_state=42,
+            n_jobs=4,
+            objective='reg:absoluteerror'
+        )
+        if len(X_train_movers) > 0:
+            regressor.fit(X_train_movers, y_train_movers)
+        else:
+            regressor.fit(X_train, y_train)
 
-    # 4. Calibrate confidence threshold tau strictly on validation set
-    print("Calibrating decision threshold on validation set...")
+    # 4. Calibrate confidence threshold tau on validation set
     raw_val_probs = classifier.predict_proba(X_val)[:, 1]
     raw_val_mags = regressor.predict(X_val)
-
     y_val_arr = y_val.to_numpy()
     naive_val_mae = mean_absolute_error(y_val_arr, np.zeros_like(y_val_arr))
     best_mae = naive_val_mae
@@ -197,12 +274,7 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
             best_mae = candidate_mae
             best_prob_thresh = candidate
 
-    if best_prob_thresh <= 1.0:
-        print(f"Optimal threshold locked: tau = {best_prob_thresh:.2f} (Val MAE: {best_mae:.4f}%)")
-    else:
-        print("Warning: Model did not beat naive 0.0% baseline on validation set. Falling back to zero-return mode.")
-
-    # 5. Evaluate on out-of-time blind test set
+    # 5. Evaluate on blind test set
     test_probs = classifier.predict_proba(X_test)[:, 1]
     test_mags = regressor.predict(X_test)
     y_test_arr = y_test.to_numpy()
@@ -216,7 +288,6 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
 
     mae = mean_absolute_error(y_test_arr, predictions)
     rmse = np.sqrt(mean_squared_error(y_test_arr, predictions))
-
     active_mask = predictions != 0.0
     total_active_trades = int(active_mask.sum())
     if total_active_trades > 0:
@@ -227,19 +298,40 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     else:
         directional_accuracy = 0.0
 
-    print("\n--- Out-of-Time Test Set Evaluation ---")
-    print(f"Optimal threshold (tau)  : {best_prob_thresh:.2f}")
-    print(f"Model MAE                : {mae:.4f}%")
-    print(f"Naive Baseline MAE       : {naive_mae:.4f}%")
-    print(f"Model RMSE               : {rmse:.4f}%")
-    print(f"Triggered Signals        : {total_active_trades:,} / {len(X_test):,} ({total_active_trades / len(X_test) * 100:.2f}%)")
-    print(f"Directional Accuracy     : {directional_accuracy:.2f}% (on triggered signals)")
+    if HAS_RICH:
+        score_table = Table(
+            title="[bold white]OUT-OF-TIME BLIND TEST SET EVALUATION[/bold white]",
+            box=box.ROUNDED,
+            border_style="bright_black",
+            show_header=True,
+            header_style="bold cyan",
+            expand=True
+        )
+        score_table.add_column("Optimal Cutoff (τ)", justify="center")
+        score_table.add_column("Model MAE", justify="center", style="bold green")
+        score_table.add_column("Naive Zero-MAE", justify="center", style="dim yellow")
+        score_table.add_column("Model RMSE", justify="center")
+        score_table.add_column("Signals Triggered", justify="center")
+        score_table.add_column("Directional Accuracy", justify="center", style="bold green")
 
-    if mae < naive_mae:
-        edge_bps = (naive_mae - mae) * 100
-        print(f"Model beat naive baseline by {edge_bps:.1f} bps.")
+        score_table.add_row(
+            f"τ = {best_prob_thresh:.2f}",
+            f"{mae:.4f}%",
+            f"{naive_mae:.4f}%",
+            f"{rmse:.4f}%",
+            f"{total_active_trades:,} / {len(X_test):,} ({total_active_trades / len(X_test) * 100:.1f}%)",
+            f"{directional_accuracy:.1f}%"
+        )
+        console.print(score_table)
+        console.print()
     else:
-        print("Quality gate warning: Model MAE did not beat naive zero-return baseline.")
+        print("\n--- Out-of-Time Test Set Evaluation ---")
+        print(f"Optimal threshold (tau)  : {best_prob_thresh:.2f}")
+        print(f"Model MAE                : {mae:.4f}%")
+        print(f"Naive Baseline MAE       : {naive_mae:.4f}%")
+        print(f"Model RMSE               : {rmse:.4f}%")
+        print(f"Triggered Signals        : {total_active_trades:,} / {len(X_test):,} ({total_active_trades / len(X_test) * 100:.2f}%)")
+        print(f"Directional Accuracy     : {directional_accuracy:.2f}% (on triggered signals)")
 
     # 6. Save model artifact
     os.makedirs(model_output_dir, exist_ok=True)
@@ -260,7 +352,11 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
         }
     }
     joblib.dump(artifact, model_path)
-    print(f"Saved artifact to: {model_path}\n")
+
+    if HAS_RICH:
+        console.print(f"[bold green]✓ Model artifact successfully serialized:[/bold green] [white]{model_path}[/white]\n")
+    else:
+        print(f"Saved artifact to: {model_path}\n")
 
 
 if __name__ == "__main__":
