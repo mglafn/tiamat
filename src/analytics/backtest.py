@@ -12,21 +12,14 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich import box
+    from rich.columns import Columns
     HAS_RICH = True
     console = Console()
 except ImportError:
     HAS_RICH = False
 
-
-def find_repo_root() -> Path:
-    current = Path(__file__).resolve().parent
-    for p in [current, current.parent, current.parent.parent]:
-        if (p / "data").exists() or (p / "models").exists() or (p / "requirements.txt").exists():
-            return p
-    return current.parent.parent
-
-
-BASE_DIR = find_repo_root()
+# Robust repo root anchor (goes up 2 levels from src/analytics/ -> project root)
+BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
@@ -90,10 +83,6 @@ def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd
     return out
 
 
-# ==============================================================================
-# TERMINAL REPORT RENDERERS (RICH + PLAIN TEXT FALLBACK)
-# ==============================================================================
-
 def _render_rich_report(payload: dict, show_ablation: bool = True):
     params = payload["params"]
     summary = payload["summary"]
@@ -103,84 +92,70 @@ def _render_rich_report(payload: dict, show_ablation: bool = True):
     vetoed_traps = payload["vetoed_traps"]
 
     # 1. Header Banner
-    header_text = Text()
-    header_text.append("MTG QUANT TERMINAL · OUT-OF-TIME WALK-FORWARD BACKTEST\n", style="bold cyan")
-    header_text.append(
-        f"Evaluation Window: {summary['test_start_date']} → {summary['test_end_date']}  |  "
-        f"Evaluated Universe: {summary['test_universe_count']:,} Instances\n",
-        style="dim white"
-    )
-    header_text.append("Anti-Leakage Safeguard: Pure Chronological 14-Day Embargo Verified (Zero Drift)", style="green")
-    console.print(Panel(header_text, box=box.ROUNDED, style="cyan", border_style="cyan"))
-
-    # 2. Parameters & Configuration Table
-    cfg_table = Table(
-        title="Simulation Parameters & Execution Configuration",
-        box=box.ROUNDED,
-        title_style="bold cyan",
-        show_header=True,
-        header_style="bold blue"
-    )
-    cfg_table.add_column("Parameter", style="dim cyan", no_wrap=True)
-    cfg_table.add_column("Value", style="bold white")
-    cfg_table.add_column("Parameter", style="dim cyan", no_wrap=True)
-    cfg_table.add_column("Value", style="bold white")
-
-    seller_tier = "TCGplayer Direct Pro (8.95%)" if params.get("is_pro") else "Standard Marketplace (10.75%)"
-    daily_cap = f"{params['top_daily']} trades/day" if params.get("top_daily", 0) > 0 else "Unconstrained"
-    sizing_mode = "Half-Kelly Fractional" if params.get("sizing") == "kelly" else "Flat Unit (1.0x)"
-
-    cfg_table.add_row("Evaluation Start Date", str(summary['test_start_date']), "Target Net ROI Hurdle", f"≥ {params['min_net_roi_pct']:.1f}%")
-    cfg_table.add_row("Evaluation End Date", str(summary['test_end_date']), "Classifier Threshold (τ)", f"{params['tau']:.2f}")
-    cfg_table.add_row("Signal Filtering Mode", params["filter_mode"].upper(), "Trade Ranking Metric", params["sort_by"].upper())
-    cfg_table.add_row("Position Sizing Model", sizing_mode, "Daily Execution Limit", daily_cap)
-    cfg_table.add_row("Seller Fee Schedule", seller_tier, "Condition Intake Haircut (κ)", "Active [80.0% - 100.0%]")
-    console.print(cfg_table)
-    console.print()
-
-    # 3. Core Strategy Performance KPIs
-    kpi_table = Table(
-        title="Active Strategy Execution & Portfolio Scorecard",
-        box=box.ROUNDED,
-        title_style="bold green",
-        show_header=True,
-        header_style="bold magenta"
-    )
-    kpi_table.add_column("Metric", style="bold white")
-    kpi_table.add_column("Value", justify="right", style="bold")
-    kpi_table.add_column("Metric", style="bold white")
-    kpi_table.add_column("Value", justify="right", style="bold")
+    header = Table.grid(expand=True)
+    header.add_column(justify="left", ratio=3)
+    header.add_column(justify="right", ratio=2)
+    title_text = Text()
+    title_text.append("MTG QUANT ARBITRAGE TERMINAL", style="bold cyan")
+    title_text.append(" │ ", style="dim white")
+    title_text.append("Out-Of-Time Walk-Forward Evaluation", style="bold white")
+    meta_text = Text()
+    meta_text.append(f"Window: {summary['test_start_date']} → {summary['test_end_date']}\n", style="dim white")
+    meta_text.append(f"Universe: {summary['test_universe_count']:,} cards  ", style="dim white")
+    meta_text.append("[Verified 14d Embargo]", style="bold green")
+    header.add_row(title_text, meta_text)
+    console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
 
     pnl = summary["total_net_profit"]
     roi = summary["portfolio_roi"]
     win_rate = summary["win_rate"]
-    pnl_style = "green" if pnl >= 0 else "red"
-    roi_style = "green" if roi >= 0 else "red"
-    wr_style = "green" if win_rate >= 50 else ("yellow" if win_rate >= 40 else "red")
     expectancy = pnl / summary["total_trades"] if summary["total_trades"] > 0 else 0.0
+    pnl_color = "bold green" if pnl >= 0 else "bold red"
+    roi_color = "bold green" if roi >= 0 else "bold red"
+    wr_color = "bold green" if win_rate >= 50 else ("bold yellow" if win_rate >= 40 else "bold red")
 
-    kpi_table.add_row("Total Capital Committed", f"${summary['total_capital']:,.2f}", "Total Net Realized PnL", f"[{pnl_style}]${pnl:+,.2f}[/{pnl_style}]")
-    kpi_table.add_row("Portfolio Realized ROI", f"[{roi_style}]{roi:+.2f}%[/{roi_style}]", "Average Trade ROI", f"{summary['avg_trade_roi']:+.2f}%")
-    kpi_table.add_row("Total Trades Executed", f"{summary['total_trades']:,} ({summary['win_trades']}W / {summary['loss_trades']}L)", "Realized Win Rate", f"[{wr_style}]{win_rate:.1f}%[/{wr_style}]")
-    kpi_table.add_row("Profit Factor (Wins / Losses)", f"{summary['profit_factor']:.2f}", "Trade Expectancy ($/Trade)", f"${expectancy:+,.2f}")
-    kpi_table.add_row("Average Kelly Fraction", f"{summary['avg_kelly']:.3f}", "Dead-Zone Fee Clamping", "[$2.50, $2.67] Clamped")
-    console.print(kpi_table)
+    # 2. Performance Scorecard
+    score_table = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold cyan",
+        border_style="bright_black",
+        expand=True,
+        title="[bold white]1. STRATEGY PERFORMANCE SCORECARD[/bold white]",
+        title_justify="left"
+    )
+    score_table.add_column("Net Realized PnL", justify="center")
+    score_table.add_column("Portfolio ROI", justify="center")
+    score_table.add_column("Win Rate (W / L)", justify="center")
+    score_table.add_column("Profit Factor", justify="center")
+    score_table.add_column("Trade Expectancy", justify="center")
+    score_table.add_column("Capital Committed", justify="center")
+    score_table.add_row(
+        f"[{pnl_color}]${pnl:+,.2f}[/{pnl_color}]",
+        f"[{roi_color}]{roi:+.2f}%[/{roi_color}]",
+        f"[{wr_color}]{win_rate:.1f}%[/{wr_color}] [dim]({summary['win_trades']}W/{summary['loss_trades']}L)[/dim]",
+        f"[bold]{summary['profit_factor']:.2f}[/bold]",
+        f"[bold]${expectancy:+,.2f}[/bold] [dim]/trade[/dim]",
+        f"[bold]${summary['total_capital']:,.2f}[/bold]"
+    )
+    console.print(score_table)
     console.print()
 
-    # 4. Counterfactual Ablation Analysis
+    # 3. Counterfactual Ablation
     if show_ablation:
         abl_table = Table(
-            title="Counterfactual Ablation: Active Hurdle vs. Naive Unfiltered ML Baseline",
+            title="[bold white]2. COUNTERFACTUAL ABLATION: ACTIVE HURDLE vs. NAIVE ML BASELINE[/bold white]",
+            title_justify="left",
             box=box.ROUNDED,
-            title_style="bold yellow",
+            border_style="bright_black",
             show_header=True,
-            header_style="bold cyan"
+            header_style="bold blue",
+            expand=True
         )
-        abl_table.add_column("Dimension / Strategy KPI", style="bold white")
-        abl_table.add_column("Active Hurdle Strategy", justify="right", style="bold green")
-        abl_table.add_column("Naive ML Baseline", justify="right", style="bold yellow")
-        abl_table.add_column("Strategy Alpha / Delta", justify="right", style="bold cyan")
-
+        abl_table.add_column("Strategy Dimension", style="bold white")
+        abl_table.add_column("Active Hurdle Strategy", justify="right", style="green")
+        abl_table.add_column("Naive ML Baseline", justify="right", style="yellow")
+        abl_table.add_column("Net Alpha / Delta", justify="right", style="bold cyan")
         total_trades = summary["total_trades"]
         naive_trades = ablation["naive_trades"]
         trade_diff = total_trades - naive_trades
@@ -194,39 +169,70 @@ def _render_rich_report(payload: dict, show_ablation: bool = True):
         cap_saved_pct = ablation["capital_saved_pct"]
         naive_wr = ablation["naive_win_rate"]
         wr_diff = win_rate - naive_wr
-
-        abl_table.add_row("Trades Executed", f"{total_trades:,}", f"{naive_trades:,}", f"{trade_diff:+,} trades")
-        abl_table.add_row("Realized Win Rate (%)", f"{win_rate:.1f}%", f"{naive_wr:.1f}%", f"{wr_diff:+.1f}%")
-        abl_table.add_row("Capital Committed ($)", f"${cap:,.2f}", f"${naive_cap:,.2f}", f"${cap_saved:,.2f} preserved ({cap_saved_pct:.1f}%)")
-        abl_table.add_row("Realized Net PnL ($)", f"${pnl:+,.2f}", f"${naive_pnl:+,.2f}", f"[bold green]${alpha_cash:+,.2f} Cash Alpha[/bold green]")
-        abl_table.add_row("Portfolio ROI (%)", f"{roi:+.2f}%", f"{naive_roi:+.2f}%", f"[bold green]{alpha_bps:+.1f} bps Spread Alpha[/bold green]")
-        abl_table.add_row("Vetoed Trap Losses Avoided", "—", "—", f"[bold green]${ablation['vetoed_losses_avoided']:,.2f} Loss Avoided[/bold green]")
+        abl_table.add_row("Execution Volume", f"{total_trades:,} trades", f"{naive_trades:,} trades", f"{trade_diff:+,} trades [dim](Filtered)[/dim]")
+        abl_table.add_row("Realized Win Rate", f"{win_rate:.1f}%", f"{naive_wr:.1f}%", f"[bold green]{wr_diff:+.1f}%[/bold green]")
+        abl_table.add_row("Capital Committed", f"${cap:,.2f}", f"${naive_cap:,.2f}", f"[bold cyan]${cap_saved:,.2f}[/bold cyan] [dim]({cap_saved_pct:.1f}% Saved)[/dim]")
+        abl_table.add_row("Realized Net PnL", f"${pnl:+,.2f}", f"${naive_pnl:+,.2f}", f"[bold green]${alpha_cash:+,.2f} Cash Alpha[/bold green]")
+        abl_table.add_row("Realized Portfolio ROI", f"{roi:+.2f}%", f"{naive_roi:+.2f}%", f"[bold green]{alpha_bps:+.1f} bps Spread Alpha[/bold green]")
+        abl_table.add_row("Vetoed Trap Losses Avoided", "—", "—", f"[bold green]${ablation['vetoed_losses_avoided']:,.2f} Shielded[/bold green]")
         console.print(abl_table)
         console.print()
 
-    # 5. Top Alpha Generating Trades
+    # 4. Simulation Parameters
+    seller_tier = "TCG Direct Pro (8.95%)" if params.get("is_pro") else "Standard Direct (10.75%)"
+    daily_cap = f"{params['top_daily']}/day" if params.get("top_daily", 0) > 0 else "Uncapped"
+    sizing_mode = "Half-Kelly Fractional" if params.get("sizing") == "kelly" else "Flat Unit (1.0x)"
+    cfg_table = Table(
+        box=box.ROUNDED,
+        show_header=False,
+        border_style="dim",
+        expand=True,
+        title="[bold white]3. EXECUTION SPECIFICATIONS & CONSTRAINTS[/bold white]",
+        title_justify="left"
+    )
+    cfg_table.add_column("Param1", style="dim cyan", ratio=1)
+    cfg_table.add_column("Val1", style="white", ratio=1)
+    cfg_table.add_column("Param2", style="dim cyan", ratio=1)
+    cfg_table.add_column("Val2", style="white", ratio=1)
+    cfg_table.add_column("Param3", style="dim cyan", ratio=1)
+    cfg_table.add_column("Val3", style="white", ratio=1)
+    cfg_table.add_row(
+        "Net ROI Hurdle", f"≥ {params['min_net_roi_pct']:.1f}%",
+        "Confidence (τ)", f"{params['tau']:.2f}",
+        "Position Sizing", sizing_mode
+    )
+    cfg_table.add_row(
+        "Filter Mode", params["filter_mode"].upper(),
+        "Fee Rate Card", seller_tier,
+        "Daily Limit", daily_cap
+    )
+    console.print(cfg_table)
+    console.print()
+
+    # 5. Top Alpha Trades
     if len(top_trades) > 0:
         win_table = Table(
-            title=f"Top Executed Trades Ranked by Realized Net Profit (Showing Top {len(top_trades)})",
+            title=f"[bold white]4. TOP ALPHA GENERATING TRADES (Showing Top {len(top_trades)})[/bold white]",
+            title_justify="left",
             box=box.ROUNDED,
-            title_style="bold green",
+            border_style="bright_black",
             show_header=True,
-            header_style="bold white"
+            header_style="bold green",
+            expand=True
         )
         win_table.add_column("Date", style="dim", no_wrap=True)
-        win_table.add_column("Asset Name / Card SKU", style="bold white", max_width=26, overflow="ellipsis")
+        win_table.add_column("Card SKU / Identifier", style="bold white", max_width=28, overflow="ellipsis")
         win_table.add_column("Set", style="cyan", justify="center")
-        win_table.add_column("Finish", style="yellow", justify="center")
+        win_table.add_column("Finish", style="dim yellow", justify="center")
         win_table.add_column("Units", justify="right", style="dim")
-        win_table.add_column("Basis", justify="right", style="dim")
+        win_table.add_column("Cost Basis", justify="right", style="dim")
         win_table.add_column("Realized Exit", justify="right")
         win_table.add_column("Actual Mkt", justify="right", style="dim")
         win_table.add_column("Net Profit", justify="right", style="bold green")
         win_table.add_column("Net ROI", justify="right", style="bold green")
-        win_table.add_column("Kelly", justify="right", style="dim")
-
         for t in top_trades:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
             win_table.add_row(
                 t["price_date"],
                 t["name"],
@@ -237,35 +243,35 @@ def _render_rich_report(payload: dict, show_ablation: bool = True):
                 f"${t['realized_exit_payout']:.2f}",
                 f"${t['actual_future_price']:.2f}",
                 f"${t['total_profit']:+,.2f}",
-                f"{t['net_roi_pct']:+.1f}%",
-                f"{t['kelly_fraction']:.2f}"
+                f"{t['net_roi_pct']:+.1f}%"
             )
         console.print(win_table)
         console.print()
 
-    # 6. Worst Trades / Drawdowns
+    # 6. Largest Losses
     if len(worst_trades) > 0:
         loss_table = Table(
-            title=f"Worst Executed Trades / Drawdowns (Showing Top {len(worst_trades)})",
+            title=f"[bold white]5. LARGEST REALIZED LOSSES & DRAWDOWNS (Showing Worst {len(worst_trades)})[/bold white]",
+            title_justify="left",
             box=box.ROUNDED,
-            title_style="bold red",
+            border_style="bright_black",
             show_header=True,
-            header_style="bold white"
+            header_style="bold red",
+            expand=True
         )
         loss_table.add_column("Date", style="dim", no_wrap=True)
-        loss_table.add_column("Asset Name / Card SKU", style="bold white", max_width=26, overflow="ellipsis")
+        loss_table.add_column("Card SKU / Identifier", style="bold white", max_width=28, overflow="ellipsis")
         loss_table.add_column("Set", style="cyan", justify="center")
-        loss_table.add_column("Finish", style="yellow", justify="center")
+        loss_table.add_column("Finish", style="dim yellow", justify="center")
         loss_table.add_column("Units", justify="right", style="dim")
-        loss_table.add_column("Basis", justify="right", style="dim")
+        loss_table.add_column("Cost Basis", justify="right", style="dim")
         loss_table.add_column("Realized Exit", justify="right")
         loss_table.add_column("Actual Mkt", justify="right", style="dim")
         loss_table.add_column("Net Loss", justify="right", style="bold red")
         loss_table.add_column("Net ROI", justify="right", style="bold red")
-        loss_table.add_column("Pred Gain", justify="right", style="dim")
-
         for t in worst_trades:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
             loss_table.add_row(
                 t["price_date"],
                 t["name"],
@@ -276,34 +282,35 @@ def _render_rich_report(payload: dict, show_ablation: bool = True):
                 f"${t['realized_exit_payout']:.2f}",
                 f"${t['actual_future_price']:.2f}",
                 f"${t['total_profit']:+,.2f}",
-                f"{t['net_roi_pct']:+.1f}%",
-                f"{t['pred_magnitude']:+.1f}%"
+                f"{t['net_roi_pct']:+.1f}%"
             )
         console.print(loss_table)
         console.print()
 
-    # 7. Vetoed Value Traps Case Studies
+    # 7. Vetoed Value Traps
     if len(vetoed_traps) > 0:
         trap_table = Table(
-            title=f"Vetoed Value Traps (Anti-Leakage & Friction Defense Case Studies)",
+            title=f"[bold white]6. VETOED VALUE TRAPS (Anti-Leakage & Friction Defense Proof)[/bold white]",
+            title_justify="left",
             box=box.ROUNDED,
-            title_style="bold magenta",
+            border_style="bright_black",
             show_header=True,
-            header_style="bold white"
+            header_style="bold magenta",
+            expand=True
         )
         trap_table.add_column("Date", style="dim", no_wrap=True)
-        trap_table.add_column("Asset Name / SKU", style="bold white", max_width=26, overflow="ellipsis")
+        trap_table.add_column("Card SKU / Identifier", style="bold white", max_width=28, overflow="ellipsis")
         trap_table.add_column("Set", style="cyan", justify="center")
-        trap_table.add_column("Finish", style="yellow", justify="center")
+        trap_table.add_column("Finish", style="dim yellow", justify="center")
         trap_table.add_column("Entry Price", justify="right", style="dim")
         trap_table.add_column("ML Pred %", justify="right", style="yellow")
-        trap_table.add_column("Friction Veto Reason", style="bold magenta")
-        trap_table.add_column("Loss Avoided", justify="right", style="bold green")
-
+        trap_table.add_column("Friction Guardrail Reason", style="bold magenta")
+        trap_table.add_column("Loss Shielded", justify="right", style="bold green")
         for t in vetoed_traps:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
             avoided = abs(t['total_profit']) if t['total_profit'] < 0 else 0.0
-            avoided_str = f"+${avoided:.2f}" if avoided > 0 else "Fee drag shielded"
+            avoided_str = f"+${avoided:.2f}" if avoided > 0 else "Drag Shielded"
             trap_table.add_row(
                 t["price_date"],
                 t["name"],
@@ -317,7 +324,6 @@ def _render_rich_report(payload: dict, show_ablation: bool = True):
         console.print(trap_table)
         console.print()
 
-
 def _render_plain_report(payload: dict, show_ablation: bool = True):
     params = payload["params"]
     summary = payload["summary"]
@@ -325,73 +331,54 @@ def _render_plain_report(payload: dict, show_ablation: bool = True):
     top_trades = payload["top_trades"]
     worst_trades = payload["worst_trades"]
     vetoed_traps = payload["vetoed_traps"]
-
-    sep = "=" * 80
-    sub_sep = "-" * 80
-
-    print("\n" + sep)
-    print(" MTG QUANT TERMINAL · OUT-OF-TIME WALK-FORWARD BACKTEST")
-    print(f" Evaluation Window : {summary['test_start_date']} to {summary['test_end_date']}")
-    print(f" Universe Size     : {summary['test_universe_count']:,} instances evaluated")
-    print(sep)
-
-    print(f"\n[CONFIGURATION & PARAMETERS]")
-    print(f"  Target Net ROI Hurdle  : >= {params['min_net_roi_pct']:.1f}%")
-    print(f"  Confidence Cutoff (tau): {params['tau']:.2f}")
-    print(f"  Filtering Strategy     : {params['filter_mode'].upper()}")
-    print(f"  Trade Ranking Metric   : {params['sort_by'].upper()}")
-    print(f"  Position Sizing Model  : {params['sizing'].upper()}")
-    print(f"  Seller Fee Schedule    : {'TCGplayer Direct Pro (8.95%)' if params.get('is_pro') else 'Standard Marketplace (10.75%)'}")
-    print(f"  Daily Execution Cap    : {params['top_daily'] if params.get('top_daily', 0) > 0 else 'Unconstrained'}")
-
     pnl = summary["total_net_profit"]
     expectancy = pnl / summary["total_trades"] if summary["total_trades"] > 0 else 0.0
-
-    print(f"\n[PORTFOLIO PERFORMANCE SCORECARD]")
-    print(f"  Total Capital Committed : ${summary['total_capital']:,.2f}")
+    print("\n" + "=" * 88)
+    print(" MTG QUANT ARBITRAGE TERMINAL │ OUT-OF-TIME WALK-FORWARD BACKTEST")
+    print(f" Evaluation Window : {summary['test_start_date']} to {summary['test_end_date']}  │  Universe: {summary['test_universe_count']:,} instances")
+    print("=" * 88)
+    print("\n[1. STRATEGY PERFORMANCE SCORECARD]")
     print(f"  Total Net Realized PnL  : ${pnl:+,.2f}")
     print(f"  Portfolio Realized ROI  : {summary['portfolio_roi']:+.2f}%")
-    print(f"  Average Trade Net ROI   : {summary['avg_trade_roi']:+.2f}%")
-    print(f"  Total Trades Executed   : {summary['total_trades']:,} ({summary['win_trades']} Wins / {summary['loss_trades']} Losses)")
-    print(f"  Realized Win Rate       : {summary['win_rate']:.2f}%")
+    print(f"  Win Rate (W / L)        : {summary['win_rate']:.1f}% ({summary['win_trades']}W / {summary['loss_trades']}L)")
     print(f"  Profit Factor           : {summary['profit_factor']:.2f}")
-    print(f"  Trade Expectancy        : ${expectancy:+,.2f} per trade")
-    print(f"  Average Kelly Fraction  : {summary['avg_kelly']:.3f}")
-
+    print(f"  Trade Expectancy        : ${expectancy:+,.2f} / trade")
+    print(f"  Capital Committed       : ${summary['total_capital']:,.2f}")
     if show_ablation:
-        print(f"\n[COUNTERFACTUAL ABLATION: ACTIVE HURDLE VS NAIVE ML BASELINE]")
-        print(f"  Active Trades : {summary['total_trades']:,}  |  Naive Baseline Trades : {ablation['naive_trades']:,}")
-        print(f"  Active Win Rate: {summary['win_rate']:.1f}%   |  Naive Baseline Win Rate: {ablation['naive_win_rate']:.1f}%")
-        print(f"  Active Profit : ${pnl:+,.2f} |  Naive Baseline Profit  : ${ablation['naive_profit']:+,.2f}")
-        print(f"  Active ROI    : {summary['portfolio_roi']:+.2f}%  |  Naive Baseline ROI     : {ablation['naive_roi']:+.2f}%")
-        print(f"  -> Generated Cash Alpha    : ${ablation['alpha_cash']:+,.2f}")
-        print(f"  -> Generated Spread Alpha  : {ablation['alpha_roi_bps']:+.1f} bps")
-        print(f"  -> Preserved Drag Capital  : ${ablation['capital_saved']:,.2f} ({ablation['capital_saved_pct']:.1f}%)")
-        print(f"  -> Trap Losses Avoided     : ${ablation['vetoed_losses_avoided']:,.2f}")
-
+        print("\n[2. COUNTERFACTUAL ABLATION: ACTIVE HURDLE vs NAIVE ML BASELINE]")
+        print(f"  Execution Volume        : {summary['total_trades']:,} trades (vs {ablation['naive_trades']:,} Naive)")
+        print(f"  Realized Win Rate       : {summary['win_rate']:.1f}% (vs {ablation['naive_win_rate']:.1f}% Naive)")
+        print(f"  Capital Committed       : ${summary['total_capital']:,.2f} (${ablation['capital_saved']:,.2f} saved)")
+        print(f"  Realized Net PnL        : ${pnl:+,.2f} (Cash Alpha: ${ablation['alpha_cash']:+,.2f})")
+        print(f"  Realized Portfolio ROI  : {summary['portfolio_roi']:+.2f}% (Spread Alpha: {ablation['alpha_roi_bps']:+.1f} bps)")
+        print(f"  Trap Losses Avoided     : ${ablation['vetoed_losses_avoided']:,.2f}")
+    print("\n[3. EXECUTION SPECIFICATIONS]")
+    print(f"  Net ROI Hurdle : >= {params['min_net_roi_pct']:.1f}%    │ Confidence Cutoff (tau) : {params['tau']:.2f}")
+    print(f"  Filter Mode    : {params['filter_mode'].upper()}     │ Fee Schedule            : {'TCGplayer Pro (8.95%)' if params.get('is_pro') else 'Standard Direct (10.75%)'}")
+    print(f"  Position Model : {params['sizing'].upper()}      │ Daily Execution Cap     : {params['top_daily'] if params.get('top_daily', 0) > 0 else 'Uncapped'}")
     if len(top_trades) > 0:
-        print(f"\n[TOP REALIZED ALPHA TRADES]")
+        print("\n[4. TOP ALPHA GENERATING TRADES]")
         for t in top_trades:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
-            print(f"  + {t['price_date']} | {t['name']} ({set_str}) [{t['finish'].upper()}]")
-            print(f"    Basis: ${t['basis']:.2f} | Realized Exit: ${t['realized_exit_payout']:.2f} | PnL: ${t['total_profit']:+,.2f} ({t['net_roi_pct']:+.1f}% ROI) | Kelly: {t['kelly_fraction']:.2f}")
-
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
+            print(f"  + {t['price_date']} │ {t['name']:<24} ({set_str}) [{t['finish'].upper()}]")
+            print(f"    Basis: ${t['basis']:.2f} -> Exit: ${t['realized_exit_payout']:.2f} │ PnL: ${t['total_profit']:+,.2f} ({t['net_roi_pct']:+.1f}% ROI)")
     if len(worst_trades) > 0:
-        print(f"\n[WORST TRADES / DRAWDOWNS]")
+        print("\n[5. LARGEST REALIZED LOSSES]")
         for t in worst_trades:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
-            print(f"  - {t['price_date']} | {t['name']} ({set_str}) [{t['finish'].upper()}]")
-            print(f"    Basis: ${t['basis']:.2f} | Realized Exit: ${t['realized_exit_payout']:.2f} | PnL: ${t['total_profit']:+,.2f} ({t['net_roi_pct']:+.1f}% ROI) | Pred Gain: {t['pred_magnitude']:+.1f}%")
-
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
+            print(f"  - {t['price_date']} │ {t['name']:<24} ({set_str}) [{t['finish'].upper()}]")
+            print(f"    Basis: ${t['basis']:.2f} -> Exit: ${t['realized_exit_payout']:.2f} │ PnL: ${t['total_profit']:+,.2f} ({t['net_roi_pct']:+.1f}% ROI)")
     if len(vetoed_traps) > 0:
-        print(f"\n[VETOED VALUE TRAPS / FRICTION CASE STUDIES]")
+        print("\n[6. VETOED VALUE TRAPS / FRICTION DEFENSE]")
         for t in vetoed_traps:
-            set_str = f"{t['set_code']}" + (f" #{t['collector_number']}" if t.get('collector_number') else "")
+            col_num = f" #{t['collector_number']}" if t.get('collector_number') else ""
+            set_str = f"{t['set_code']}{col_num}"
             avoided = abs(t['total_profit']) if t['total_profit'] < 0 else 0.0
-            print(f"  x {t['price_date']} | {t['name']} ({set_str}) [{t['finish'].upper()}]")
-            print(f"    Entry: ${t['current_price']:.2f} | Pred: {t['pred_magnitude']:+.1f}% | Reason: {t.get('veto_reason', 'Friction Barrier')} | Avoided Loss: +${avoided:.2f}")
-
-    print("\n" + sep + "\n")
+            print(f"  x {t['price_date']} │ {t['name']:<24} ({set_str}) [{t['finish'].upper()}]")
+            print(f"    Entry: ${t['current_price']:.2f} │ Pred: {t['pred_magnitude']:+.1f}% │ Veto Reason: {t.get('veto_reason', 'Friction Barrier')} │ Saved: +${avoided:.2f}")
+    print("\n" + "=" * 88 + "\n")
 
 
 def render_terminal_report(payload: dict, show_ablation: bool = True):
@@ -400,10 +387,6 @@ def render_terminal_report(payload: dict, show_ablation: bool = True):
     else:
         _render_plain_report(payload, show_ablation=show_ablation)
 
-
-# ==============================================================================
-# QUANTITATIVE BACKTEST SIMULATION ENGINE
-# ==============================================================================
 
 def run_arbitrage_backtest(
     min_net_roi_pct: float = 10.0,
@@ -474,10 +457,9 @@ def run_arbitrage_backtest(
     if total_test_universe == 0:
         if as_dict:
             return {"status": "empty", "message": f"No records >= {test_start_date.date()}"}
-        print(f"No records found in test window.", file=sys.stderr)
+        print("No records found in test window.", file=sys.stderr)
         return
 
-    # Inference & Bayesian expectations
     X_test = test_df[feature_cols].fillna(0.0)
     test_df['move_prob'] = classifier.predict_proba(X_test)[:, 1]
     test_df['pred_magnitude'] = regressor.predict(X_test)
@@ -488,21 +470,18 @@ def run_arbitrage_backtest(
     test_df['basis'] = (test_df['current_price'] * 1.075) + inbound_postage + hub_freight
     test_df['exp_exit'] = np.maximum(0.01, test_df['current_price'] * (1.0 + test_df['pred_magnitude'] / 100.0))
 
-    # Win scenario
     payout_win_raw = calculate_direct_payout_series(test_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
     kappa_win = calculate_condition_risk_haircut(test_df['exp_exit'], test_df['basis'])
     test_df['payout_win'] = payout_win_raw * kappa_win
     test_df['profit_win'] = test_df['payout_win'] - test_df['basis']
     test_df['roi_win_pct'] = (test_df['profit_win'] / test_df['basis']) * 100.0
 
-    # Fail scenario
     payout_fail_raw = calculate_direct_payout_series(test_df['current_price'], clamp_dead_zone=True, is_pro=is_pro)
     kappa_fail = calculate_condition_risk_haircut(test_df['current_price'], test_df['basis'])
     test_df['payout_fail'] = payout_fail_raw * kappa_fail
     test_df['profit_fail'] = test_df['payout_fail'] - test_df['basis']
     test_df['loss_fail_pct'] = (test_df['profit_fail'] / test_df['basis']) * 100.0
 
-    # Bayesian expectation & Kelly sizing
     p = test_df['move_prob']
     test_df['exp_net_profit'] = (p * test_df['profit_win']) + ((1.0 - p) * test_df['profit_fail'])
     test_df['exp_net_roi_pct'] = (test_df['exp_net_profit'] / test_df['basis']) * 100.0
@@ -530,7 +509,6 @@ def run_arbitrage_backtest(
         "win_roi": ("roi_win_pct", False),
     }
     sort_col, sort_asc = sort_columns.get(sort_by, ("exp_net_roi_pct", False))
-
     buy_signals = test_df[active_mask].copy().sort_values(by=sort_col, ascending=sort_asc)
     naive_signals = test_df[naive_mask].copy().sort_values(by="roi_win_pct", ascending=False)
 
@@ -548,13 +526,11 @@ def run_arbitrage_backtest(
     win_trades = int(buy_signals['is_win'].sum()) if total_trades > 0 else 0
     loss_trades = total_trades - win_trades
     win_rate = (win_trades / total_trades) * 100.0 if total_trades > 0 else 0.0
-
     total_capital = float(buy_signals['total_cost'].sum()) if total_trades > 0 else 0.0
     total_net_profit = float(buy_signals['total_profit'].sum()) if total_trades > 0 else 0.0
     portfolio_roi = (total_net_profit / total_capital) * 100.0 if total_capital > 0 else 0.0
     avg_trade_roi = float(buy_signals['net_roi_pct'].mean()) if total_trades > 0 else 0.0
     avg_kelly = float(buy_signals['kelly_fraction'].mean()) if total_trades > 0 else 0.0
-
     gross_gains = float(buy_signals[buy_signals['total_profit'] > 0]['total_profit'].sum()) if total_trades > 0 else 0.0
     gross_losses = float(abs(buy_signals[buy_signals['total_profit'] < 0]['total_profit'].sum())) if total_trades > 0 else 0.0
     profit_factor = (gross_gains / gross_losses) if gross_losses > 0 else (999.0 if gross_gains > 0 else 0.0)
@@ -580,7 +556,6 @@ def run_arbitrage_backtest(
     naive_prof = float(naive_signals['total_profit'].sum()) if len(naive_signals) > 0 else 0.0
     naive_roi = (naive_prof / naive_cap * 100.0) if naive_cap > 0 else 0.0
     naive_win_rate = (int(naive_signals['is_win'].sum()) / len(naive_signals) * 100.0) if len(naive_signals) > 0 else 0.0
-
     alpha_cash = total_net_profit - naive_prof
     alpha_roi_bps = (portfolio_roi - naive_roi) * 100.0
     capital_saved = naive_cap - total_capital
@@ -590,7 +565,6 @@ def run_arbitrage_backtest(
     all_dates = sorted(list(set(test_df['price_date'].dt.strftime('%Y-%m-%d'))))
     active_by_date = buy_signals.groupby(buy_signals['price_date'].dt.strftime('%Y-%m-%d'))['total_profit'].sum().to_dict() if total_trades > 0 else {}
     naive_by_date = naive_signals.groupby(naive_signals['price_date'].dt.strftime('%Y-%m-%d'))['total_profit'].sum().to_dict() if len(naive_signals) > 0 else {}
-
     equity_curve = []
     cum_active = 0.0
     cum_naive = 0.0
@@ -676,7 +650,6 @@ def run_arbitrage_backtest(
 
     if as_dict:
         return payload
-
     render_terminal_report(payload, show_ablation=show_ablation)
 
 
