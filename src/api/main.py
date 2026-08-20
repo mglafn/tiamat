@@ -289,9 +289,9 @@ def health_check():
 def get_backtest_simulation(
     hurdle: float = Query(10.0, ge=0.0, le=50.0),
     tau: Optional[float] = Query(None, ge=0.5, le=0.99),
-    filter_mode: str = Query("exp_roi", regex="^(exp_roi|win_roi|kelly)$"),
-    sort_by: str = Query("exp_roi", regex="^(exp_roi|kelly|dollars|win_roi)$"),
-    sizing: str = Query("flat", regex="^(flat|kelly)$"),
+    filter_mode: str = Query("exp_roi", pattern="^(exp_roi|win_roi|kelly)$"),
+    sort_by: str = Query("exp_roi", pattern="^(exp_roi|kelly|dollars|win_roi)$"),
+    sizing: str = Query("flat", pattern="^(flat|kelly)$"),
     top_daily: int = Query(0, ge=0, le=20),
     is_pro: bool = Query(False)
 ):
