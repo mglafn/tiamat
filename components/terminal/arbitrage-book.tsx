@@ -135,7 +135,7 @@ export function ArbitrageBook({
   }
 
   return (
-    <section className="relative flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Market spread order book">
+    <section className="isolate relative flex h-full min-h-0 flex-col border-r border-border-strong bg-panel" aria-label="Market spread order book">  
       {/* Book Header */}
       <div className="flex items-center justify-between border-b border-border-strong bg-surface px-3 py-1.5">
         <div className="flex items-center gap-2">
