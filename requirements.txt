@@ -21,3 +21,5 @@ pydantic
 pytest
 black
 rich
+
+react

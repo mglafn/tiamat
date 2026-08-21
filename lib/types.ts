@@ -50,11 +50,18 @@ export interface PredictionResponse {
   predicted_7d_price: number
   predicted_gain_pct: number
   model_mae: number
+  move_prob: number
+  cqr_lpb: number
+  price_decay_velocity_3d: number
+  amihud_illiquidity_30d: number
   directional_accuracy_pct?: number | null
   expected_net_payout?: number | null
   net_expected_roi_pct?: number | null
   is_dead_zone_clamped?: boolean | null
   kappa_risk?: number | null
+  allocated_kelly_units: number
+  is_defensive_vetoed: boolean
+  veto_reasons: string[]
 }
 
 export interface CardMarketSummary {
@@ -83,4 +90,55 @@ export interface CardSearchResult {
   floor_price: number
   avg_price: number
   vendor_count: number
+}
+
+export interface BacktestSummary {
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_capital: number
+  total_net_profit: number
+  portfolio_roi: number
+  test_start_date: string
+  test_end_date: string
+  test_universe_count: number
+}
+
+export interface BacktestAblation {
+  naive_trades: number
+  naive_profit: number
+}
+
+export interface BacktestTrade {
+  uuid: string
+  name: string
+  set_code: string
+  finish: string
+  price_date: string
+  current_price: number
+  basis: number
+  realized_exit_payout: number
+  actual_future_price: number
+  allocated_units: number
+  total_profit: number
+  net_roi_pct: number
+  is_win: boolean
+}
+
+export interface BacktestResponse {
+  status: string
+  params: {
+    min_net_roi_pct: number
+    tau: number
+    filter_mode: string
+    sizing: string
+    top_daily: number
+    is_pro: boolean
+  }
+  funnel: Record<string, number>
+  summary: BacktestSummary
+  ablation: BacktestAblation
+  top_trades: BacktestTrade[]
+  worst_trades: BacktestTrade[]
 }
