@@ -363,8 +363,8 @@ def run_arbitrage_backtest(
 
     # Defensive Guardrail Funnel
     stage1_mask = (test_df['move_prob'] >= prob_threshold) & (test_df['pred_magnitude'] > 0.0)
-    cqr_safety_mask = test_df['cqr_lpb'] >= -15.0  # Statistical lower bound constraint
-    decay_filter = test_df['price_decay_velocity_3d'] >= -0.5
+    cqr_safety_mask = test_df['cqr_lpb'] >= -5.0  # Statistical lower bound constraint
+    decay_filter = test_df['price_decay_velocity_3d'] >= -0.005
     roi_hurdle_mask = test_df['exp_net_roi_pct'] >= min_net_roi_pct
 
     naive_mask = stage1_mask & (test_df['roi_win_pct'] >= min_net_roi_pct)
