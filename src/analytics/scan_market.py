@@ -24,18 +24,38 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-
-# ---------------------------------------------------------
-# Pickled Custom Definitions (Required for joblib.load)
-# ---------------------------------------------------------
-def custom_asymmetric_objective(y_true, y_pred):
-    errors = y_pred - y_true
+def smooth_asymmetric_huber_objective(y_true, y_pred):
+    """
+    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
+    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
+    instability and hessian discontinuity near zero-error bounds.
+    """
+    e = y_pred - y_true
     alpha = 0.20
     gamma = 5.0
-    grad = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma) * errors, 2.0 * alpha * errors)
-    hess = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma), 2.0 * alpha)
+    delta = 1.0
+    k = 10.0
+    
+    sig = 1.0 / (1.0 + np.exp(-k * e))
+    dsig = k * sig * (1.0 - sig)
+    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
+    
+    scale_factor = 1.0 - 2.0 * alpha + gamma
+    w = alpha + scale_factor * sig
+    dw = scale_factor * dsig
+    ddw = scale_factor * ddsig
+    
+    u = e / delta
+    sqrt_term = np.sqrt(1.0 + u**2)
+    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
+    dl_huber = 2.0 * e / sqrt_term
+    ddl_huber = 2.0 / (sqrt_term**3)
+    
+    grad = dw * l_huber + w * dl_huber
+    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
+    
+    hess = np.maximum(hess, 1e-6)
     return grad, hess
-
 
 class ConformalizedLowerBoundGenerator:
     def __init__(self, alpha: float = 0.10):
@@ -61,10 +81,6 @@ class ConformalizedLowerBoundGenerator:
         raw_q_lo = self.q_lo_model.predict(X_test)
         return raw_q_lo - self.q_hat_conformal
 
-
-# ---------------------------------------------------------
-# Financial & Microstructural Payout Mechanics
-# ---------------------------------------------------------
 def calculate_direct_payout_series(
     prices: pd.Series,
     tax_rate: float = 0.075,
@@ -89,7 +105,6 @@ def calculate_direct_payout_series(
     )
     return np.maximum(0.0, payout)
 
-
 def calculate_condition_risk_haircut(
     direct_price: pd.Series,
     acq_cost: pd.Series,
@@ -103,7 +118,6 @@ def calculate_condition_risk_haircut(
     kappa_risk = 1.0 - (downgrade_rate * np.maximum(0.0, downgrade_penalty) + reject_rate * reject_penalty)
     return np.clip(kappa_risk, 0.80, 1.00)
 
-
 def compute_uncertainty_kelly_units(
     expected_roi_pct: pd.Series,
     cqr_lpb: pd.Series,
@@ -115,13 +129,10 @@ def compute_uncertainty_kelly_units(
 ) -> pd.Series:
     est_downside = np.maximum(0.05, (expected_roi_pct - cqr_lpb) / 100.0)
     est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    
     f_kelly = kappa_kelly * (est_upside / np.square(est_downside))
     f_kelly = np.clip(f_kelly, 0.0, 0.05)
-    
     dollar_kelly = f_kelly * portfolio_value
     amihud_dollar_cap = 0.02 / np.maximum(amihud, 1e-5)
-    
     final_dollar_size = np.minimum(
         dollar_kelly,
         np.minimum(max_position_dollars, amihud_dollar_cap)
@@ -129,22 +140,18 @@ def compute_uncertainty_kelly_units(
     units = np.floor(final_dollar_size / np.maximum(basis, 0.01))
     return np.maximum(1.0, units)
 
-
-# ---------------------------------------------------------
-# Terminal Rendering
-# ---------------------------------------------------------
 def render_market_scan_report(payload: dict):
     meta = payload["meta"]
     funnel = payload["funnel"]
     spatial_arbs = payload["spatial_arbitrage"]
     directional_alpha = payload["directional_alpha"]
     vetoed_traps = payload["vetoed_traps"]
-
+    
     if not HAS_RICH:
         print(f"\nTIAMAT MARKET SCAN │ Date: {meta['latest_date']} │ Universe: {meta['scanned_universe']:,} SKUs")
         print(f"Spatial Arbs: {len(spatial_arbs)} | Directional Alpha Signals: {len(directional_alpha)}")
         return
-
+        
     header = Table.grid(expand=True)
     header.add_column(justify="left", ratio=3)
     header.add_column(justify="right", ratio=2)
@@ -158,8 +165,7 @@ def render_market_scan_report(payload: dict):
     meta_text.append("[CQR Risk Shield Active]", style="bold green")
     header.add_row(title_text, meta_text)
     console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
-
-    # 1. Defensive Signal Funnel
+    
     funnel_table = Table(
         box=box.ROUNDED,
         header_style="bold blue",
@@ -170,15 +176,14 @@ def render_market_scan_report(payload: dict):
     funnel_table.add_column("Scanning / Vetting Stage", style="bold white")
     funnel_table.add_column("Passing Candidates", justify="right", style="cyan")
     funnel_table.add_column("Funnel Retention", justify="right", style="dim")
-
+    
     tot = meta['scanned_universe']
     for stage, count in funnel.items():
         pct = f"{(count / tot) * 100:.2f}%" if tot > 0 else "0%"
         funnel_table.add_row(stage, f"{count:,}", pct)
     console.print(funnel_table)
     console.print()
-
-    # 2. Instantaneous Spatial Arbitrage (0-Day Locked Profit)
+    
     if len(spatial_arbs) > 0:
         arb_table = Table(
             title=f"[bold white]2. INSTANTANEOUS SPATIAL ARBITRAGE (Showing Top {len(spatial_arbs)} Locked Spreads)[/bold white]",
@@ -195,7 +200,7 @@ def render_market_scan_report(payload: dict):
         arb_table.add_column("CK Credit", justify="right", style="cyan")
         arb_table.add_column("Net Spread", justify="right", style="bold green")
         arb_table.add_column("Spread %", justify="right", style="bold green")
-
+        
         for a in spatial_arbs:
             arb_table.add_row(
                 a["name"],
@@ -211,8 +216,7 @@ def render_market_scan_report(payload: dict):
         console.print()
     else:
         console.print("[dim yellow]ℹ No spatial arbitrage spreads cleared acquisition basis and fee hurdles today.[/dim yellow]\n")
-
-    # 3. High-Conviction Directional Alpha (CQR LPB Gated)
+        
     if len(directional_alpha) > 0:
         alpha_table = Table(
             title=f"[bold white]3. HIGH-CONVICTION CQR-GATED DIRECTIONAL ALPHA (Showing Top {len(directional_alpha)})[/bold white]",
@@ -230,7 +234,7 @@ def render_market_scan_report(payload: dict):
         alpha_table.add_column("E[Net ROI]", justify="right", style="bold green")
         alpha_table.add_column("Kelly Units", justify="right", style="bold white")
         alpha_table.add_column("Target Payout", justify="right", style="dim green")
-
+        
         for d in directional_alpha:
             alpha_table.add_row(
                 d["name"],
@@ -247,8 +251,7 @@ def render_market_scan_report(payload: dict):
         console.print()
     else:
         console.print("[dim green]🛡 Defensive Veto Active: No directional signals cleared CQR LPB & decay gates. (Capital 100% Preserved)[/dim green]\n")
-
-    # 4. Top Vetoed Value Traps
+        
     if len(vetoed_traps) > 0:
         trap_table = Table(
             title=f"[bold white]4. TOP VETOED VALUE TRAPS (Active Friction & Crash Defense Proof)[/bold white]",
@@ -264,7 +267,7 @@ def render_market_scan_report(payload: dict):
         trap_table.add_column("ML Pred %", justify="right", style="yellow")
         trap_table.add_column("CQR Floor", justify="right", style="dim")
         trap_table.add_column("Defensive Veto Reason", style="bold magenta")
-
+        
         for t in vetoed_traps:
             trap_table.add_row(
                 t["name"],
@@ -278,10 +281,6 @@ def render_market_scan_report(payload: dict):
         console.print(trap_table)
         console.print()
 
-
-# ---------------------------------------------------------
-# Main Market Scan Execution
-# ---------------------------------------------------------
 def scan_live_market(
     min_net_roi_pct: float = 8.0,
     min_spread: float = 0.0,
@@ -299,8 +298,7 @@ def scan_live_market(
             raise FileNotFoundError(err_msg)
         print(f"Error: {err_msg}", file=sys.stderr)
         return
-
-    # 1. Load ML Model Artifact
+        
     artifact = joblib.load(model_path)
     classifier = artifact["classifier"]
     regressor = artifact["regressor"]
@@ -308,11 +306,9 @@ def scan_live_market(
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})
     prob_threshold = tau if tau is not None else metrics.get("prob_threshold", 0.90)
-
-    # 2. Query Live Market State from DuckDB
+    
     conn = duckdb.connect(str(db_path), read_only=True)
-
-    # A. Spatial Arbitrage Query
+    
     spatial_query = f"""
         SELECT
             f.uuid,
@@ -333,8 +329,7 @@ def scan_live_market(
         LIMIT {top_n_records}
     """
     spatial_df = conn.execute(spatial_query).fetchdf()
-
-    # B. Live Features Query (Most recent date per card/finish)
+    
     features_query = """
         WITH latest_features AS (
             SELECT
@@ -356,42 +351,38 @@ def scan_live_market(
     """
     market_df = conn.execute(features_query).fetchdf()
     conn.close()
-
+    
     if len(market_df) == 0:
         return {"status": "empty", "message": "No active market records found"} if as_dict else None
-
-    # 3. Model Inference & Risk Calculus
+        
     X_live = market_df[feature_cols].fillna(0.0)
     market_df['move_prob'] = classifier.predict_proba(X_live)[:, 1]
     market_df['pred_magnitude'] = regressor.predict(X_live)
-
+    
     if cqr_generator:
         market_df['cqr_lpb'] = cqr_generator.predict_lpb(X_live)
     else:
         market_df['cqr_lpb'] = market_df['pred_magnitude'] - 10.0
-
-    # Economic Basis & Payouts
+        
     inbound_postage = np.where(market_df['current_price'] < 5.00, 0.99, 0.15)
     hub_freight = 0.012
     market_df['basis'] = (market_df['current_price'] * 1.075) + inbound_postage + hub_freight
     market_df['exp_exit'] = np.maximum(0.01, market_df['current_price'] * (1.0 + market_df['pred_magnitude'] / 100.0))
-
+    
     payout_win_raw = calculate_direct_payout_series(market_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
     kappa_win = calculate_condition_risk_haircut(market_df['exp_exit'], market_df['basis'])
     market_df['exp_exit_payout'] = payout_win_raw * kappa_win
     market_df['profit_win'] = market_df['exp_exit_payout'] - market_df['basis']
-
-    # Downside Failure Payoff (-10% drift)
+    
     fail_price = market_df['current_price'] * 0.90
     payout_fail_raw = calculate_direct_payout_series(fail_price, clamp_dead_zone=True, is_pro=is_pro)
     kappa_fail = calculate_condition_risk_haircut(fail_price, market_df['basis'])
     market_df['profit_fail'] = (payout_fail_raw * kappa_fail) - market_df['basis']
-
+    
     p = market_df['move_prob']
     market_df['exp_net_profit'] = (p * market_df['profit_win']) + ((1.0 - p) * market_df['profit_fail'])
     market_df['exp_net_roi_pct'] = (market_df['exp_net_profit'] / market_df['basis']) * 100.0
-
-    # 4. Uncertainty Kelly Sizing
+    
     if sizing == "kelly":
         market_df['allocated_units'] = compute_uncertainty_kelly_units(
             market_df['exp_net_roi_pct'],
@@ -401,15 +392,13 @@ def scan_live_market(
         )
     else:
         market_df['allocated_units'] = 1.0
-
-    # 5. Defensive Execution Funnel
+        
     stage1_mask = (market_df['move_prob'] >= prob_threshold) & (market_df['pred_magnitude'] > 0.0)
     cqr_mask = market_df['cqr_lpb'] >= -15.0
     decay_mask = market_df['price_decay_velocity_3d'] >= -0.5
     roi_mask = market_df['exp_net_roi_pct'] >= min_net_roi_pct
-
     active_mask = stage1_mask & cqr_mask & decay_mask & roi_mask
-
+    
     funnel_counts = {
         "Total Scanned Active SKUs": len(market_df),
         "Stage 1 Spike Mover (τ)": int(stage1_mask.sum()),
@@ -417,14 +406,11 @@ def scan_live_market(
         "Set Decay Filter Passed (≥ -0.5%/d)": int((stage1_mask & cqr_mask & decay_mask).sum()),
         "Net ROI Hurdle Cleared": int(active_mask.sum())
     }
-
-    # Extract Directional Winners
+    
     directional_candidates = market_df[active_mask].copy().sort_values(by="exp_net_roi_pct", ascending=False).head(top_n_records)
-
-    # Extract Vetoed Value Traps (High prediction or mover, but failed safety gates)
     trap_mask = stage1_mask & (~active_mask)
     vetoed_df = market_df[trap_mask].copy().sort_values(by="pred_magnitude", ascending=False).head(top_n_records)
-
+    
     def resolve_veto_reason(row):
         if row['cqr_lpb'] < -15.0:
             return f"CQR Floor Breach ({row['cqr_lpb']:.1f}% < -15.0%)"
@@ -433,11 +419,10 @@ def scan_live_market(
         if row['exp_net_roi_pct'] < min_net_roi_pct:
             return f"Sub-Hurdle E[ROI] ({row['exp_net_roi_pct']:.1f}% < {min_net_roi_pct:.1f}%)"
         return "Microstructural Drag"
-
+        
     if len(vetoed_df) > 0:
         vetoed_df['veto_reason'] = vetoed_df.apply(resolve_veto_reason, axis=1)
-
-    # Sanitize lists for JSON / Terminal
+        
     def sanitize_rows(df_sub):
         if len(df_sub) == 0:
             return []
@@ -457,7 +442,7 @@ def scan_live_market(
                 "veto_reason": r.get("veto_reason", None)
             })
         return out
-
+        
     payload = {
         "status": "success",
         "meta": {
@@ -471,12 +456,11 @@ def scan_live_market(
         "directional_alpha": sanitize_rows(directional_candidates),
         "vetoed_traps": sanitize_rows(vetoed_df)
     }
-
+    
     if not as_dict:
         render_market_scan_report(payload)
-
+        
     return payload
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -490,7 +474,7 @@ def main():
     parser.add_argument("--pro", action="store_true", help="Use TCGplayer Pro seller rate card (8.95%%)")
     parser.add_argument("--top", "-n", type=int, default=8, help="Number of records to display in each section")
     args = parser.parse_args()
-
+    
     scan_live_market(
         min_net_roi_pct=args.hurdle,
         min_spread=args.min_spread,
@@ -499,7 +483,6 @@ def main():
         is_pro=args.pro,
         top_n_records=args.top
     )
-
 
 if __name__ == "__main__":
     main()

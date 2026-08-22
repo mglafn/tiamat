@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -12,6 +13,7 @@ try:
     from rich.table import Table
     from rich.panel import Panel
     from rich.text import Text
+    from rich.align import Align
     from rich import box
     HAS_RICH = True
     console = Console()
@@ -23,15 +25,37 @@ DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
 
-# ---------------------------------------------------------
-# Pickled Custom Definitions (Required for joblib.load)
-# ---------------------------------------------------------
-def custom_asymmetric_objective(y_true, y_pred):
-    errors = y_pred - y_true
+def smooth_asymmetric_huber_objective(y_true, y_pred):
+    """
+    Smooth Asymmetric Expectile Huber Loss (SAEHL).
+    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson 
+    leaf weight instability and hessian step-jumps.
+    """
+    e = y_pred - y_true
     alpha = 0.20
     gamma = 5.0
-    grad = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma) * errors, 2.0 * alpha * errors)
-    hess = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma), 2.0 * alpha)
+    delta = 1.0
+    k = 10.0
+    
+    sig = 1.0 / (1.0 + np.exp(-k * e))
+    dsig = k * sig * (1.0 - sig)
+    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
+    
+    scale_factor = 1.0 - 2.0 * alpha + gamma
+    w = alpha + scale_factor * sig
+    dw = scale_factor * dsig
+    ddw = scale_factor * ddsig
+    
+    u = e / delta
+    sqrt_term = np.sqrt(1.0 + u**2)
+    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
+    dl_huber = 2.0 * e / sqrt_term
+    ddl_huber = 2.0 / (sqrt_term**3)
+    
+    grad = dw * l_huber + w * dl_huber
+    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
+    hess = np.maximum(hess, 1e-6)
+    
     return grad, hess
 
 
@@ -60,9 +84,6 @@ class ConformalizedLowerBoundGenerator:
         return raw_q_lo - self.q_hat_conformal
 
 
-# ---------------------------------------------------------
-# Financial & Microstructural Payout Mechanics
-# ---------------------------------------------------------
 def calculate_direct_payout_series(
     prices: pd.Series,
     tax_rate: float = 0.075,
@@ -72,14 +93,17 @@ def calculate_direct_payout_series(
     p = prices.copy().astype(float)
     if clamp_dead_zone:
         p = np.where((p >= 2.50) & (p <= 2.67), 2.49, p)
+    
     sub_tier_fee = np.round(p * 0.50, 2)
     sub_tier_payout = p - sub_tier_fee
+    
     commission = np.minimum(p * 0.0895, 75.00)
     pro_fee = np.minimum(p * 0.025, 75.00) if is_pro else 0.0
     gross_total = p * (1.0 + tax_rate)
     processing = gross_total * 0.025
     standard_fee = np.round(1.12 + commission + pro_fee + processing, 2)
     standard_payout = p - standard_fee
+    
     payout = np.where(
         p < 0.40,
         0.0,
@@ -113,13 +137,10 @@ def compute_uncertainty_kelly_units(
 ) -> pd.Series:
     est_downside = np.maximum(0.05, (expected_roi_pct - cqr_lpb) / 100.0)
     est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    
     f_kelly = kappa_kelly * (est_upside / np.square(est_downside))
     f_kelly = np.clip(f_kelly, 0.0, 0.05)
-    
     dollar_kelly = f_kelly * portfolio_value
     amihud_dollar_cap = 0.02 / np.maximum(amihud, 1e-5)
-    
     final_dollar_size = np.minimum(
         dollar_kelly,
         np.minimum(max_position_dollars, amihud_dollar_cap)
@@ -136,23 +157,20 @@ def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd
         for c in required_cols:
             out[c] = pd.Series(dtype='float64' if c != 'is_win' else 'bool')
         return out
-
+        
     out = df.copy()
     if sizing == "kelly":
         out['allocated_units'] = compute_uncertainty_kelly_units(
-            out['exp_net_roi_pct'],
-            out['cqr_lpb'],
-            out['basis'],
-            out['amihud_illiquidity_30d']
+            out['exp_net_roi_pct'], out['cqr_lpb'], out['basis'], out['amihud_illiquidity_30d']
         )
     else:
         out['allocated_units'] = 1.0
-
+        
     out['actual_future_price'] = out['current_price'] * (1.0 + out['target_return_7d_pct'] / 100.0)
     raw_realized_payout = calculate_direct_payout_series(out['actual_future_price'], clamp_dead_zone=True, is_pro=is_pro)
     realized_kappa = calculate_condition_risk_haircut(out['actual_future_price'], out['basis'])
-    out['realized_exit_payout'] = raw_realized_payout * realized_kappa
     
+    out['realized_exit_payout'] = raw_realized_payout * realized_kappa
     out['unit_profit'] = out['realized_exit_payout'] - out['basis']
     out['net_roi_pct'] = (out['unit_profit'] / out['basis']) * 100.0
     out['is_win'] = out['unit_profit'] > 0
@@ -161,59 +179,78 @@ def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd
     return out
 
 
-# ---------------------------------------------------------
-# Terminal Rendering
-# ---------------------------------------------------------
 def render_terminal_scorecard(payload: dict):
     summary = payload["summary"]
     ablation = payload["ablation"]
     funnel = payload.get("funnel", {})
     top_trades = payload["top_trades"]
-
+    worst_trades = payload.get("worst_trades", [])
+    params = payload["params"]
+    
     if not HAS_RICH:
-        print(f"\nNet PnL: ${summary['total_net_profit']:+,.2f} | ROI: {summary['portfolio_roi']:+.2f}% | Trades: {summary['total_trades']}")
+        print("\n" + "=" * 80)
+        print(f"TIAMAT QUANT TERMINAL │ BACKTEST SCORECARD")
+        print(f"Window: {summary['test_start_date']} to {summary['test_end_date']} | Universe: {summary['test_universe_count']:,}")
+        print(f"Net Realized PnL : ${summary['total_net_profit']:+,.2f}")
+        print(f"Portfolio Net ROI: {summary['portfolio_roi']:+.2f}%")
+        print(f"Win Rate         : {summary['win_rate']:.1f}% ({summary['win_trades']}W / {summary['loss_trades']}L)")
+        print(f"Capital Deployed : ${summary['total_capital']:,.2f}")
+        print("=" * 80 + "\n")
         return
 
+    console.print()
+    
+    # 1. Terminal Master Header
     header = Table.grid(expand=True)
     header.add_column(justify="left", ratio=3)
     header.add_column(justify="right", ratio=2)
+    
     title_text = Text()
     title_text.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
     title_text.append(" │ ", style="dim white")
-    title_text.append("CQR & Risk-Gated Backtest", style="bold white")
+    title_text.append("Walk-Forward Backtest Engine", style="bold white")
+    
     meta_text = Text()
     meta_text.append(f"Window: {summary['test_start_date']} → {summary['test_end_date']}\n", style="dim white")
-    meta_text.append(f"Universe: {summary['test_universe_count']:,} cards  ", style="dim white")
-    meta_text.append("[Verified 14d Embargo]", style="bold green")
+    meta_text.append(f"Holdout: {summary['test_universe_count']:,} SKUs  ", style="dim white")
+    meta_text.append("[14D Embargo Verified]", style="bold green")
+    
     header.add_row(title_text, meta_text)
     console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
 
-    # Funnel Table
+    # 2. Defensive Signal & Veto Funnel
     if funnel:
         funnel_table = Table(
             box=box.ROUNDED,
-            header_style="bold blue",
+            header_style="bold cyan",
             border_style="dim",
             expand=True,
-            title="[bold white]1. DEFENSIVE SIGNAL FUNNEL[/bold white]"
+            title="[bold white]1. DEFENSIVE SIGNAL & VETO FUNNEL[/bold white]"
         )
-        funnel_table.add_column("Stage Filter / Gate", style="bold white")
-        funnel_table.add_column("Candidates Passing", justify="right", style="cyan")
-        funnel_table.add_column("Retention", justify="right", style="dim")
+        funnel_table.add_column("Vetting / Guardrail Stage", style="bold white")
+        funnel_table.add_column("Passing Candidates", justify="right", style="cyan")
+        funnel_table.add_column("Funnel Retention", justify="right", style="dim")
+        funnel_table.add_column("Stage Attrition", justify="right", style="dim yellow")
         
         tot = summary['test_universe_count']
+        prev_count = tot
         for stage, count in funnel.items():
-            pct = f"{(count / tot) * 100:.2f}%" if tot > 0 else "0%"
-            funnel_table.add_row(stage, f"{count:,}", pct)
+            pct = f"{(count / tot) * 100:.3f}%" if tot > 0 else "0%"
+            dropped = prev_count - count
+            drop_pct = f"-{(dropped / prev_count) * 100:.1f}%" if prev_count > 0 and dropped > 0 else "—"
+            funnel_table.add_row(stage, f"{count:,}", pct, drop_pct)
+            prev_count = count
+            
         console.print(funnel_table)
         console.print()
 
+    # 3. Strategy Performance Scorecard
     pnl = summary["total_net_profit"]
     roi = summary["portfolio_roi"]
     win_rate = summary["win_rate"]
-    pnl_color = "bold green" if pnl >= 0 else "bold red"
-    roi_color = "bold green" if roi >= 0 else "bold red"
-
+    pnl_style = "bold green" if pnl >= 0 else "bold red"
+    roi_style = "bold green" if roi >= 0 else "bold red"
+    
     score_table = Table(
         box=box.ROUNDED,
         show_header=True,
@@ -226,35 +263,87 @@ def render_terminal_scorecard(payload: dict):
     score_table.add_column("Portfolio ROI", justify="center")
     score_table.add_column("Win Rate (W / L)", justify="center")
     score_table.add_column("Capital Committed", justify="center")
+    score_table.add_column("Profit Factor", justify="center")
+    score_table.add_column("Avg Win / Loss", justify="center")
+    
     score_table.add_row(
-        f"[{pnl_color}]${pnl:+,.2f}[/{pnl_color}]",
-        f"[{roi_color}]{roi:+.2f}%[/{roi_color}]",
+        f"[{pnl_style}]${pnl:+,.2f}[/{pnl_style}]",
+        f"[{roi_style}]{roi:+.2f}%[/{roi_style}]",
         f"{win_rate:.1f}% ({summary['win_trades']}W / {summary['loss_trades']}L)",
-        f"${summary['total_capital']:,.2f}"
+        f"${summary['total_capital']:,.2f}",
+        f"{summary.get('profit_factor', 0.0):.2f}" if summary.get('profit_factor') else "—",
+        f"${summary.get('avg_win', 0.0):.2f} / ${summary.get('avg_loss', 0.0):.2f}"
     )
     console.print(score_table)
     console.print()
 
+    # 4. Strategy Ablation Benchmark
+    ablation_table = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold magenta",
+        border_style="dim",
+        expand=True,
+        title="[bold white]3. ABLATION BENCHMARK (Defensive CQR vs. Naive Baseline)[/bold white]"
+    )
+    ablation_table.add_column("Execution Architecture", style="bold white")
+    ablation_table.add_column("Triggered Trades", justify="right")
+    ablation_table.add_column("Capital Committed", justify="right")
+    ablation_table.add_column("Realized Net PnL", justify="right")
+    ablation_table.add_column("Portfolio ROI", justify="right")
+    ablation_table.add_column("Loss Shield / Alpha Delta", justify="right", style="bold green")
+
+    naive_pnl = ablation.get("naive_profit", 0.0)
+    naive_trades = ablation.get("naive_trades", 0)
+    naive_roi = ablation.get("naive_roi", 0.0)
+    naive_capital = ablation.get("naive_capital", 0.0)
+    
+    loss_reduction = (naive_pnl - pnl) if naive_pnl < 0 else (pnl - naive_pnl)
+    shield_msg = f"+${abs(loss_reduction):.2f} Preserved" if pnl > naive_pnl else f"${loss_reduction:+.2f}"
+
+    ablation_table.add_row(
+        "Naive Stage 1 (Flat 1-Unit / No CQR)",
+        f"{naive_trades:,}",
+        f"${naive_capital:,.2f}" if naive_capital > 0 else "—",
+        f"[red]${naive_pnl:+,.2f}[/red]" if naive_pnl < 0 else f"${naive_pnl:+,.2f}",
+        f"{naive_roi:+.1f}%",
+        "Baseline"
+    )
+    ablation_table.add_row(
+        "[bold cyan]CQR-Gated + Uncertainty Kelly (Prod)[/bold cyan]",
+        f"[bold white]{summary['total_trades']:,}[/bold white]",
+        f"${summary['total_capital']:,.2f}",
+        f"[{pnl_style}]${pnl:+,.2f}[/{pnl_style}]",
+        f"[{roi_style}]{roi:+.1f}%[/{roi_style}]",
+        f"[bold green]{shield_msg}[/bold green]"
+    )
+    console.print(ablation_table)
+    console.print()
+
+    # 5. Top Winning Executions
     if len(top_trades) > 0:
         win_table = Table(
-            title=f"[bold white]3. EXECUTED TRADES (Showing Top {len(top_trades)})[/bold white]",
+            title=f"[bold white]4. TOP REALIZED ALPHA TRADES (Showing Top {len(top_trades)})[/bold white]",
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold green",
             expand=True
         )
-        win_table.add_column("Date", style="dim")
-        win_table.add_column("Card SKU", style="bold white")
-        win_table.add_column("Finish", justify="center")
+        win_table.add_column("Date", style="dim", width=11)
+        win_table.add_column("Card SKU / Instrument", style="bold white")
+        win_table.add_column("Set", justify="center", style="cyan")
+        win_table.add_column("Finish", justify="center", style="yellow")
         win_table.add_column("Units", justify="right")
-        win_table.add_column("Cost Basis", justify="right")
+        win_table.add_column("Cost Basis", justify="right", style="dim")
         win_table.add_column("Realized Exit", justify="right")
         win_table.add_column("Net Profit", justify="right", style="bold green")
         win_table.add_column("Net ROI", justify="right", style="bold green")
+        
         for t in top_trades:
             win_table.add_row(
                 t["price_date"],
-                f"{t['name']} ({t['set_code']})",
+                t["name"],
+                t["set_code"],
                 t["finish"].upper(),
                 str(t.get("allocated_units", 1)),
                 f"${t['basis']:.2f}",
@@ -265,12 +354,58 @@ def render_terminal_scorecard(payload: dict):
         console.print(win_table)
         console.print()
     else:
-        console.print("[dim yellow]ℹ No trades passed all defensive gates in this evaluation window. (Capital 100% preserved)[/dim yellow]\n")
+        console.print("[dim yellow]ℹ No trades passed all defensive gates in this evaluation window. (Capital 100% Preserved)[/dim yellow]\n")
+
+    # 6. Worst Trades / Loss Autopsy
+    if len(worst_trades) > 0:
+        loss_table = Table(
+            title=f"[bold white]5. LOSS AUTOPSY & DRAWDOWN ANALYSIS (Showing Worst {len(worst_trades)})[/bold white]",
+            box=box.ROUNDED,
+            border_style="bright_black",
+            header_style="bold red",
+            expand=True
+        )
+        loss_table.add_column("Date", style="dim", width=11)
+        loss_table.add_column("Card SKU / Instrument", style="bold white")
+        loss_table.add_column("Set", justify="center", style="cyan")
+        loss_table.add_column("Finish", justify="center", style="yellow")
+        loss_table.add_column("Units", justify="right")
+        loss_table.add_column("Cost Basis", justify="right", style="dim")
+        loss_table.add_column("Realized Exit", justify="right")
+        loss_table.add_column("Net Loss", justify="right", style="bold red")
+        loss_table.add_column("Net ROI", justify="right", style="bold red")
+        
+        for w in worst_trades:
+            loss_table.add_row(
+                w["price_date"],
+                w["name"],
+                w["set_code"],
+                w["finish"].upper(),
+                str(w.get("allocated_units", 1)),
+                f"${w['basis']:.2f}",
+                f"${w['realized_exit_payout']:.2f}",
+                f"${w['total_profit']:+,.2f}",
+                f"{w['net_roi_pct']:+.1f}%"
+            )
+        console.print(loss_table)
+        console.print()
+
+    # 7. Executive Risk Banner
+    risk_summary = Text()
+    risk_summary.append("  • Asymmetric VaR Loss: Active (29:1 Overestimation Penalty)\n", style="white")
+    risk_summary.append("  • Conformal CQR Floor: Active (LPB ≥ -5.0% Gate)\n", style="white")
+    risk_summary.append("  • Sizing Engine       : Uncertainty-Penalized Kelly with $50.00 Position Ceiling\n", style="white")
+    risk_summary.append("  • Fee Architecture    : TCG Direct Piecewise [$2.50, $2.67] Dead-Zone Clamping Active", style="white")
+    
+    console.print(Panel(
+        risk_summary,
+        title="[bold green]EXECUTIVE RISK SHIELD STATUS[/bold green]",
+        border_style="green",
+        box=box.ROUNDED
+    ))
+    console.print()
 
 
-# ---------------------------------------------------------
-# Main Backtest Execution
-# ---------------------------------------------------------
 def run_arbitrage_backtest(
     min_net_roi_pct: float = 8.0,
     tau: float = None,
@@ -290,7 +425,7 @@ def run_arbitrage_backtest(
             raise FileNotFoundError(err_msg)
         print(f"Error: {err_msg}", file=sys.stderr)
         return
-
+        
     artifact = joblib.load(model_path)
     classifier = artifact["classifier"]
     regressor = artifact["regressor"]
@@ -299,7 +434,7 @@ def run_arbitrage_backtest(
     metrics = artifact.get("metrics", {})
     prob_threshold = tau if tau is not None else metrics.get("prob_threshold", 0.90)
     persisted_split_date = metrics.get("split_date", None)
-
+    
     conn = duckdb.connect(str(db_path), read_only=True)
     query = """
         SELECT
@@ -319,17 +454,17 @@ def run_arbitrage_backtest(
     """
     df = conn.execute(query).fetchdf()
     conn.close()
-
+    
     if len(df) == 0:
         return {"status": "empty", "message": "No historical instances in dataset"} if as_dict else None
-
+        
     df['price_date'] = pd.to_datetime(df['price_date'])
     test_start_date = pd.to_datetime(persisted_split_date) if persisted_split_date else df['price_date'].max() - pd.Timedelta(days=12)
     test_df = df[df['price_date'] >= test_start_date].copy().reset_index(drop=True)
-
+    
     if len(test_df) == 0:
         return {"status": "empty", "message": f"No records >= {test_start_date.date()}"} if as_dict else None
-
+        
     X_test = test_df[feature_cols].fillna(0.0)
     test_df['move_prob'] = classifier.predict_proba(X_test)[:, 1]
     test_df['pred_magnitude'] = regressor.predict(X_test)
@@ -338,57 +473,54 @@ def run_arbitrage_backtest(
         test_df['cqr_lpb'] = cqr_generator.predict_lpb(X_test)
     else:
         test_df['cqr_lpb'] = test_df['pred_magnitude'] - 10.0
-
+        
     inbound_postage = np.where(test_df['current_price'] < 5.00, 0.99, 0.15)
     hub_freight = 0.012
     test_df['basis'] = (test_df['current_price'] * 1.075) + inbound_postage + hub_freight
     test_df['exp_exit'] = np.maximum(0.01, test_df['current_price'] * (1.0 + test_df['pred_magnitude'] / 100.0))
-
+    
     payout_win_raw = calculate_direct_payout_series(test_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
     kappa_win = calculate_condition_risk_haircut(test_df['exp_exit'], test_df['basis'])
     test_df['payout_win'] = payout_win_raw * kappa_win
     test_df['profit_win'] = test_df['payout_win'] - test_df['basis']
     test_df['roi_win_pct'] = (test_df['profit_win'] / test_df['basis']) * 100.0
-
-    # Model downside failure state (-10% drift)
+    
     assumed_fail_price = test_df['current_price'] * 0.90
     payout_fail_raw = calculate_direct_payout_series(assumed_fail_price, clamp_dead_zone=True, is_pro=is_pro)
     kappa_fail = calculate_condition_risk_haircut(assumed_fail_price, test_df['basis'])
     test_df['payout_fail'] = payout_fail_raw * kappa_fail
     test_df['profit_fail'] = test_df['payout_fail'] - test_df['basis']
-
+    
     p = test_df['move_prob']
     test_df['exp_net_profit'] = (p * test_df['profit_win']) + ((1.0 - p) * test_df['profit_fail'])
     test_df['exp_net_roi_pct'] = (test_df['exp_net_profit'] / test_df['basis']) * 100.0
-
-    # Defensive Guardrail Funnel
+    
     stage1_mask = (test_df['move_prob'] >= prob_threshold) & (test_df['pred_magnitude'] > 0.0)
-    cqr_safety_mask = test_df['cqr_lpb'] >= -5.0  # Statistical lower bound constraint
+    cqr_safety_mask = test_df['cqr_lpb'] >= -5.0
     decay_filter = test_df['price_decay_velocity_3d'] >= -0.005
     roi_hurdle_mask = test_df['exp_net_roi_pct'] >= min_net_roi_pct
-
     naive_mask = stage1_mask & (test_df['roi_win_pct'] >= min_net_roi_pct)
     active_mask = stage1_mask & cqr_safety_mask & decay_filter & roi_hurdle_mask
-
+    
     funnel_counts = {
         "Total Test Candidates": len(test_df),
         "Stage 1 Spike Mover (τ)": int(stage1_mask.sum()),
-        "CQR LPB Floor Passed": int((stage1_mask & cqr_safety_mask).sum()),
-        "Set Decay Filter Passed": int((stage1_mask & cqr_safety_mask & decay_filter).sum()),
+        "CQR LPB Floor Passed (≥ -5.0%)": int((stage1_mask & cqr_safety_mask).sum()),
+        "Set Decay Filter Passed (≥ -0.5%/d)": int((stage1_mask & cqr_safety_mask & decay_filter).sum()),
         "Net ROI Hurdle Cleared": int(active_mask.sum())
     }
-
+    
     buy_signals = test_df[active_mask].copy()
     naive_signals = test_df[naive_mask].copy()
-
+    
     if len(buy_signals) > 0:
         buy_signals = buy_signals.sort_values(by="exp_net_roi_pct", ascending=False)
         if top_daily > 0:
             buy_signals = buy_signals.groupby('price_date', group_keys=False).apply(lambda g: g.head(top_daily)).reset_index(drop=True)
-
+            
     buy_signals = evaluate_dataframe_trades(buy_signals, is_pro, sizing)
     naive_signals = evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat")
-
+    
     total_trades = len(buy_signals)
     win_trades = int(buy_signals['is_win'].sum()) if total_trades > 0 else 0
     loss_trades = total_trades - win_trades
@@ -396,6 +528,16 @@ def run_arbitrage_backtest(
     total_capital = float(buy_signals['total_cost'].sum()) if total_trades > 0 else 0.0
     total_net_profit = float(buy_signals['total_profit'].sum()) if total_trades > 0 else 0.0
     portfolio_roi = (total_net_profit / total_capital) * 100.0 if total_capital > 0 else 0.0
+    
+    gross_gains = buy_signals.loc[buy_signals['is_win'], 'total_profit'].sum() if total_trades > 0 else 0.0
+    gross_losses = abs(buy_signals.loc[~buy_signals['is_win'], 'total_profit'].sum()) if total_trades > 0 else 0.0
+    profit_factor = round(gross_gains / gross_losses, 2) if gross_losses > 0 else (999.0 if gross_gains > 0 else 0.0)
+    avg_win = round(float(buy_signals.loc[buy_signals['is_win'], 'total_profit'].mean()), 2) if win_trades > 0 else 0.0
+    avg_loss = round(float(abs(buy_signals.loc[~buy_signals['is_win'], 'total_profit'].mean())), 2) if loss_trades > 0 else 0.0
+
+    naive_capital = float(naive_signals['total_cost'].sum()) if len(naive_signals) > 0 else 0.0
+    naive_pnl = float(naive_signals['total_profit'].sum()) if len(naive_signals) > 0 else 0.0
+    naive_roi = (naive_pnl / naive_capital * 100.0) if naive_capital > 0 else 0.0
 
     def sanitize_trade_records(df_slice):
         if len(df_slice) == 0 or 'total_profit' not in df_slice.columns:
@@ -418,10 +560,10 @@ def run_arbitrage_backtest(
                 "is_win": bool(r["is_win"])
             })
         return out
-
+        
     top_trades_list = sanitize_trade_records(buy_signals.sort_values(by='total_profit', ascending=False).head(top_n_records)) if total_trades > 0 else []
     worst_trades_list = sanitize_trade_records(buy_signals[buy_signals['total_profit'] < 0].sort_values(by='total_profit', ascending=True).head(top_n_records)) if total_trades > 0 else []
-
+    
     payload = {
         "status": "success",
         "params": {
@@ -441,37 +583,47 @@ def run_arbitrage_backtest(
             "total_capital": round(total_capital, 2),
             "total_net_profit": round(total_net_profit, 2),
             "portfolio_roi": round(portfolio_roi, 2),
+            "profit_factor": profit_factor,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
             "test_universe_count": len(test_df),
             "test_start_date": str(test_start_date.date()),
             "test_end_date": str(test_df['price_date'].max().date())
         },
         "ablation": {
             "naive_trades": len(naive_signals),
-            "naive_profit": round(float(naive_signals['total_profit'].sum()), 2) if len(naive_signals) > 0 else 0.0
+            "naive_capital": round(naive_capital, 2),
+            "naive_profit": round(naive_pnl, 2),
+            "naive_roi": round(naive_roi, 2)
         },
         "top_trades": top_trades_list,
         "worst_trades": worst_trades_list
     }
-
+    
     if not as_dict:
         render_terminal_scorecard(payload)
-
+        
     return payload
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tiamat Quant Terminal Backtest Engine")
+    parser = argparse.ArgumentParser(
+        description="Tiamat Quant Terminal - Backtest & Risk Scorecard Engine",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("--hurdle", type=float, default=8.0, help="Minimum net ROI %% hurdle")
     parser.add_argument("--tau", type=float, default=None, help="Spike probability threshold (default: auto from model)")
     parser.add_argument("--sizing", choices=["flat", "kelly"], default="kelly", help="Position sizing model")
     parser.add_argument("--top-daily", type=int, default=0, help="Daily trade cap")
+    parser.add_argument("--pro", action="store_true", help="Use TCGplayer Pro seller rate card (8.95%%)")
     args = parser.parse_args()
-
+    
     run_arbitrage_backtest(
         min_net_roi_pct=args.hurdle,
         tau=args.tau,
         sizing=args.sizing,
-        top_daily=args.top_daily
+        top_daily=args.top_daily,
+        is_pro=args.pro
     )
 
 

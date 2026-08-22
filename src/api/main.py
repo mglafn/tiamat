@@ -17,17 +17,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-# ---------------------------------------------------------
-# Custom Pickled Definitions (Required for joblib.load)
-# ---------------------------------------------------------
-def custom_asymmetric_objective(y_true, y_pred):
-    errors = y_pred - y_true
+def smooth_asymmetric_huber_objective(y_true, y_pred):
+    e = y_pred - y_true
     alpha = 0.20
     gamma = 5.0
-    grad = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma) * errors, 2.0 * alpha * errors)
-    hess = np.where(errors > 0, 2.0 * (1.0 - alpha + gamma), 2.0 * alpha)
+    delta = 1.0
+    k = 10.0
+    sig = 1.0 / (1.0 + np.exp(-k * e))
+    dsig = k * sig * (1.0 - sig)
+    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
+    scale_factor = 1.0 - 2.0 * alpha + gamma
+    w = alpha + scale_factor * sig
+    dw = scale_factor * dsig
+    ddw = scale_factor * ddsig
+    u = e / delta
+    sqrt_term = np.sqrt(1.0 + u**2)
+    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
+    dl_huber = 2.0 * e / sqrt_term
+    ddl_huber = 2.0 / (sqrt_term**3)
+    grad = dw * l_huber + w * dl_huber
+    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
+    hess = np.maximum(hess, 1e-6)
     return grad, hess
-
 
 class ConformalizedLowerBoundGenerator:
     def __init__(self, alpha: float = 0.10):
@@ -35,7 +46,7 @@ class ConformalizedLowerBoundGenerator:
         self.q_hi_model = GradientBoostingRegressor(loss='quantile', alpha=1.0 - (alpha / 2.0), n_estimators=100, random_state=42)
         self.alpha = alpha
         self.q_hat_conformal = None
-
+        
     def fit_and_calibrate(self, X_train, y_train, X_cal, y_cal):
         self.q_lo_model.fit(X_train, y_train)
         self.q_hi_model.fit(X_train, y_train)
@@ -46,17 +57,13 @@ class ConformalizedLowerBoundGenerator:
         q_level = np.ceil((n + 1) * (1.0 - self.alpha)) / n
         q_level = min(1.0, max(0.0, q_level))
         self.q_hat_conformal = float(np.quantile(scores, q_level, method='higher'))
-
+        
     def predict_lpb(self, X_test):
         if self.q_hat_conformal is None:
             raise ValueError("CQR model must be calibrated prior to generating lower prediction bounds.")
         raw_q_lo = self.q_lo_model.predict(X_test)
         return raw_q_lo - self.q_hat_conformal
 
-
-# ---------------------------------------------------------
-# Feature Store Alignment (17 Features)
-# ---------------------------------------------------------
 ALLOWED_FEATURE_COLS = (
     'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
     'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
@@ -87,10 +94,6 @@ FEATURE_SCHEMA = {
 
 model_artifact = None
 
-
-# ---------------------------------------------------------
-# Payout & Condition Haircut Calculus
-# ---------------------------------------------------------
 def calculate_direct_payout(
     price: float,
     tax_rate: float = 0.075,
@@ -115,7 +118,6 @@ def calculate_direct_payout(
     payout = max(Decimal('0.00'), d_price - total_fee)
     return float(payout.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN))
 
-
 def calculate_condition_risk_haircut(
     direct_price: float,
     acq_cost: float,
@@ -130,7 +132,6 @@ def calculate_condition_risk_haircut(
     kappa_risk = 1.0 - penalty
     return float(max(0.80, min(1.00, kappa_risk)))
 
-
 def sanitize_features_for_inference(feature_cols: list, feature_vals: tuple) -> pd.DataFrame:
     data = dict(zip(feature_cols, feature_vals))
     df = pd.DataFrame([data])
@@ -141,7 +142,6 @@ def sanitize_features_for_inference(feature_cols: list, feature_vals: tuple) -> 
         else:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
     return df
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -155,7 +155,6 @@ async def lifespan(app: FastAPI):
     else:
         print(f"Warning: Model artifact not found at {MODEL_PATH}")
     yield
-
 
 def get_db():
     if not DB_PATH.exists():
@@ -172,7 +171,6 @@ def get_db():
     finally:
         conn.close()
 
-
 app = FastAPI(
     title="Tiamat Quantitative Secondary Market Analytics & CQR Forecast API",
     description="Serves real-time spatial arbitrage spreads, DuckDB OLAP windowing, and CQR risk-gated 7-day price forecasts.",
@@ -182,6 +180,7 @@ app = FastAPI(
 
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -190,22 +189,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ---------------------------------------------------------
-# Pydantic Response Schemas
-# ---------------------------------------------------------
 class HealthCheck(BaseModel):
     status: str
     db_connected: bool
     model_loaded: bool
-
 
 class CatalogCard(BaseModel):
     uuid: str
     name: str
     set_code: str
     collector_number: Optional[str] = None
-
 
 class CardVariant(BaseModel):
     uuid: str
@@ -214,14 +207,12 @@ class CardVariant(BaseModel):
     floor_price: Optional[float] = None
     edhrec_rank: Optional[int] = None
 
-
 class PriceHistoryPoint(BaseModel):
     price_date: str
     price: float
     sma_7: Optional[float] = None
     sma_30: Optional[float] = None
     daily_return_pct: Optional[float] = None
-
 
 class ArbitrageOpportunity(BaseModel):
     uuid: str
@@ -234,7 +225,6 @@ class ArbitrageOpportunity(BaseModel):
     ck_price: float
     price_spread: float
     spread_pct: float
-
 
 class PredictionResponse(BaseModel):
     uuid: str
@@ -257,7 +247,6 @@ class PredictionResponse(BaseModel):
     is_defensive_vetoed: bool = False
     veto_reasons: List[str] = []
 
-
 class CardMarketSummary(BaseModel):
     uuid: str
     name: str = "Unknown Asset"
@@ -274,7 +263,6 @@ class CardMarketSummary(BaseModel):
     predicted_7d_price: Optional[float] = None
     predicted_gain_pct: Optional[float] = None
 
-
 class CardSearchResult(BaseModel):
     uuid: str
     name: str
@@ -285,14 +273,9 @@ class CardSearchResult(BaseModel):
     avg_price: float
     vendor_count: int
 
-
-# ---------------------------------------------------------
-# API Endpoints
-# ---------------------------------------------------------
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/docs")
-
 
 @app.get("/health", response_model=HealthCheck, tags=["System"])
 def health_check():
@@ -310,7 +293,6 @@ def health_check():
         db_connected=db_alive,
         model_loaded=model_artifact is not None
     )
-
 
 @app.get("/api/v1/backtest", tags=["Analytics"])
 def get_backtest_simulation(
@@ -336,7 +318,6 @@ def get_backtest_simulation(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest simulation failed: {str(e)}")
 
-
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
     card_uuid: str, finish: str = Query("normal"),
@@ -344,12 +325,12 @@ def get_forecast(
 ):
     if not model_artifact:
         raise HTTPException(status_code=503, detail="Forecasting model artifact not loaded.")
-
+        
     normalized_finish = "normal" if finish.lower() in ["nonfoil", "regular"] else finish.lower()
     raw_cols = model_artifact.get("feature_cols", list(ALLOWED_FEATURE_COLS))
     feature_cols = [c for c in raw_cols if c in ALLOWED_FEATURE_COLS]
     cols_sql = ", ".join(feature_cols)
-
+    
     query = f"""
         SELECT current_price, vendor, {cols_sql} FROM fact_card_features
         WHERE uuid = ? AND finish = ? ORDER BY price_date DESC LIMIT 1
@@ -358,70 +339,63 @@ def get_forecast(
         row = db_conn.cursor().execute(query, [card_uuid, normalized_finish]).fetchone()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading feature store: {str(e)}")
-
+        
     if not row:
         raise HTTPException(status_code=404, detail=f"Pricing metrics not found for finish '{finish}'.")
-
+        
     current_price, active_vendor, feature_vals = float(row[0]), row[1], row[2:]
     input_df = sanitize_features_for_inference(feature_cols, feature_vals)
-
+    
     metrics = model_artifact.get("metrics", {})
     mae_pct = metrics.get("mae_pct", 3.866)
     directional_acc = metrics.get("directional_accuracy_pct", 67.3)
     prob_threshold = metrics.get("prob_threshold", 0.90)
-
+    
     classifier = model_artifact.get("classifier")
     regressor = model_artifact.get("regressor")
     cqr_generator = model_artifact.get("cqr_generator")
-
-    # 1. Two-stage inference
+    
     move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
     predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
-
-    # 2. CQR Lower Prediction Bound
+    
     if cqr_generator:
         cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0])
     else:
         cqr_lpb = predicted_gain_pct - 10.0
-
-    # 3. Unit Economics & Landed Cost
+        
     predicted_7d_price = max(0.01, round(current_price * (1.0 + (predicted_gain_pct / 100.0)), 2))
     model_mae_dollars = round(current_price * (mae_pct / 100.0), 4)
-
+    
     inbound_postage = 0.99 if current_price < 5.00 else 0.15
     hub_freight = 0.012
     basis = (current_price * 1.075) + inbound_postage + hub_freight
-
+    
     raw_expected_payout = calculate_direct_payout(predicted_7d_price, 0.075, clamp_dead_zone=True, is_pro=False)
     kappa_win = calculate_condition_risk_haircut(predicted_7d_price, basis)
     payout_win = raw_expected_payout * kappa_win
     profit_win = payout_win - basis
-
-    # Downside failure state modeling (-10% drift)
+    
     assumed_fail_price = current_price * 0.90
     raw_fail_payout = calculate_direct_payout(assumed_fail_price, 0.075, clamp_dead_zone=True, is_pro=False)
     kappa_fail = calculate_condition_risk_haircut(assumed_fail_price, basis)
     payout_fail = raw_fail_payout * kappa_fail
     profit_fail = payout_fail - basis
-
+    
     exp_net_profit = (move_prob * profit_win) + ((1.0 - move_prob) * profit_fail)
     net_expected_roi_pct = (exp_net_profit / basis) * 100.0 if basis > 0 else 0.0
-
-    # 4. Uncertainty Kelly Sizing Calculation
+    
     decay_3d = float(input_df['price_decay_velocity_3d'].iloc[0]) if 'price_decay_velocity_3d' in input_df else 0.0
     amihud_val = float(input_df['amihud_illiquidity_30d'].iloc[0]) if 'amihud_illiquidity_30d' in input_df else 0.0
-
+    
     est_downside = max(0.05, (predicted_gain_pct - cqr_lpb) / 100.0)
     est_upside = max(0.05, predicted_gain_pct / 100.0)
     f_kelly = 0.25 * (est_upside / (est_downside ** 2))
     f_kelly = min(0.05, max(0.0, f_kelly))
-
     dollar_kelly = f_kelly * 10000.0
     amihud_cap = 0.02 / max(amihud_val, 1e-5)
     final_dollar = min(dollar_kelly, 50.0, amihud_cap)
     allocated_units = int(max(1.0, np.floor(final_dollar / max(basis, 0.01))))
-
-    # 5. Defensive Veto Gate Evaluation
+    
     veto_reasons = []
     if move_prob < prob_threshold:
         veto_reasons.append(f"Insufficient Spike Probability ({move_prob:.1%} < {prob_threshold:.1%})")
@@ -431,9 +405,9 @@ def get_forecast(
         veto_reasons.append(f"Active Price Decay / Falling Knife ({decay_3d:.2f}%/day < -0.50%/day)")
     if net_expected_roi_pct < 8.0:
         veto_reasons.append(f"Net ROI Below Hurdle ({net_expected_roi_pct:.1f}% < 8.0%)")
-
+        
     is_clamped = True if 2.50 <= predicted_7d_price <= 2.67 else False
-
+    
     return PredictionResponse(
         uuid=card_uuid,
         vendor="consensus",
@@ -456,7 +430,6 @@ def get_forecast(
         veto_reasons=veto_reasons
     )
 
-
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(0.00), finish: Optional[str] = Query(None), limit: int = Query(100, le=500),
@@ -467,6 +440,7 @@ def get_arbitrage(
     if finish_clause:
         params.append(finish.lower())
     params.append(int(limit))
+    
     query = f"""
         SELECT
             f.uuid,
@@ -496,7 +470,6 @@ def get_arbitrage(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Arbitrage query failed: {str(e)}")
 
-
 @app.get("/api/v1/catalog", response_model=List[CatalogCard], tags=["Catalog"])
 def get_catalog(db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
     try:
@@ -509,7 +482,6 @@ def get_catalog(db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
         ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to query dim_cards: {str(e)}")
-
 
 @app.get("/api/v1/card/printings/{card_uuid}", response_model=List[CardVariant], tags=["Catalog"])
 def get_card_printings(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
@@ -543,7 +515,6 @@ def get_card_printings(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depe
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to resolve variants: {str(e)}")
 
-
 @app.get("/api/v1/card/history/{card_uuid}", response_model=List[PriceHistoryPoint], tags=["Analytics"])
 def get_card_history(
     card_uuid: str, finish: str = Query("normal"), days: int = Query(60),
@@ -569,7 +540,6 @@ def get_card_history(
         ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch price history: {str(e)}")
-
 
 @app.get("/api/v1/search", response_model=List[CardSearchResult], tags=["Search"])
 def search_card_by_name(
@@ -604,11 +574,11 @@ def search_card_by_name(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search query execution failed: {str(e)}")
 
-
 @app.get("/api/v1/card/summary/{card_uuid}", response_model=CardMarketSummary, tags=["Analytics"])
 def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depends(get_db)):
     card_name, set_code, collector_number, edhrec_rank = "Unknown Asset", "OTC", None, None
     card_exists = False
+    
     try:
         dim_query = "SELECT name, set_code, collector_number, edhrec_rank FROM dim_cards WHERE uuid = ?"
         dim_row = db_conn.cursor().execute(dim_query, [card_uuid]).fetchone()
@@ -620,12 +590,12 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
             edhrec_rank = int(dim_row[3]) if dim_row[3] is not None else None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch card metadata: {str(e)}")
-
+        
     if not card_exists:
         check_fact = db_conn.cursor().execute("SELECT 1 FROM fact_prices WHERE uuid = ? LIMIT 1", [card_uuid]).fetchone()
         if not check_fact:
             raise HTTPException(status_code=404, detail=f"Asset UUID '{card_uuid}' not found in catalog or price records.")
-
+            
     variant_count = 1
     try:
         var_query = """
@@ -638,11 +608,11 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
             variant_count = int(var_res[0])
     except Exception:
         pass
-
+        
     finish_query = "SELECT finish FROM fact_card_features WHERE uuid = ? ORDER BY price_date DESC LIMIT 1"
     target_finish_row = db_conn.cursor().execute(finish_query, [card_uuid]).fetchone()
     primary_target_finish = target_finish_row[0] if target_finish_row else "normal"
-
+    
     agg_query = """
         WITH latest_vendor_prices AS (
             SELECT vendor, price as current_price, price_date FROM fact_prices
@@ -653,11 +623,12 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
         FROM latest_vendor_prices
     """
     agg_row = db_conn.cursor().execute(agg_query, [card_uuid, primary_target_finish]).fetchone()
+    
     floor_price = round(float(agg_row[0]), 2) if agg_row and agg_row[0] is not None else None
     avg_price = round(float(agg_row[1]), 2) if agg_row and agg_row[1] is not None else None
     ceiling_price = round(float(agg_row[2]), 2) if agg_row and agg_row[2] is not None else None
     latest_date = str(agg_row[3]) if agg_row and agg_row[3] is not None else None
-
+    
     return CardMarketSummary(
         uuid=card_uuid,
         name=card_name,
@@ -672,7 +643,6 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
         primary_vendor="consensus",
         primary_finish=str(primary_target_finish)
     )
-
 
 if __name__ == "__main__":
     import uvicorn
