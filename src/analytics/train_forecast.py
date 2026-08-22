@@ -88,38 +88,51 @@ class ConformalizedLowerBoundGenerator:
         return raw_q_lo - self.q_hat_conformal
 
 def print_header(db_path: str, model_output_dir: str):
-    header_text = Text(justify="center")
-    header_text.append("MTG ASSET FORECAST TRAINING PIPELINE\n", style="bold cyan")
-    header_text.append("Two-Stage Hurdle Architecture  •  Smooth Asymmetric Huber Objective  •  Conformal CQR Bounds\n", style="dim italic")
-    header_text.append(f"DB: {db_path}  |  Out: {model_output_dir}", style="dim")
-    console.print(Panel(header_text, border_style="cyan", box=box.ROUNDED))
+    header_grid = Table.grid(expand=True)
+    header_grid.add_column(justify="left", ratio=3)
+    header_grid.add_column(justify="right", ratio=2)
+    
+    title = Text()
+    title.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
+    title.append(" │ ", style="dim white")
+    title.append("ML Forecasting Engine Trainer", style="bold white")
+    title.append("\nTwo-Stage Hurdle Architecture • Smooth Asymmetric Loss • CQR LPB Bounds", style="dim italic")
+    
+    meta = Text()
+    meta.append(f"Database: {db_path}\n", style="dim cyan")
+    meta.append(f"Artifacts: {model_output_dir}  ", style="dim yellow")
+    meta.append("[Ready]", style="bold green")
+    
+    header_grid.add_row(title, meta)
+    console.print(Panel(header_grid, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
+    console.print()
 
 def print_split_table(splits_data: dict, total_records: int):
     table = Table(
-        title="[bold]Temporal Partition & Embargo Layout[/bold]",
+        title="[bold white]1. TEMPORAL PARTITION & EMBARGO TOPOLOGY[/bold white]",
         box=box.ROUNDED,
         header_style="bold cyan",
-        border_style="dim",
+        border_style="bright_black",
         expand=True
     )
-    table.add_column("Split Segment", style="bold white", width=18)
+    table.add_column("Partition Segment", style="bold white", width=22)
     table.add_column("Date Range", style="yellow", justify="center")
-    table.add_column("Records", justify="right")
-    table.add_column("Share", justify="right")
-    table.add_column("Movers (≥ 12%)", justify="right", style="green")
+    table.add_column("Observations", justify="right")
+    table.add_column("Universe Share", justify="right")
+    table.add_column("Breakouts (≥ +12%)", justify="right", style="bold green")
     
     for name, s in splits_data.items():
         if s.get("is_embargo"):
             table.add_row(
-                f"[dim italic]{name}[/dim italic]",
+                f"[dim italic]🛡 {name}[/dim italic]",
                 f"[dim]{s['range']}[/dim]",
-                "[dim]-[/dim]",
-                "[dim]-[/dim]",
-                "[dim]Embargo Guard[/dim]"
+                "[dim]—[/dim]",
+                "[dim]—[/dim]",
+                "[dim italic]14D Embargo Guard[/dim italic]"
             )
         else:
             share = f"{(s['count'] / total_records) * 100:.1f}%" if total_records else "0%"
-            movers = f"{s['movers']:,} ({s['movers_pct']:.1f}%)" if s['count'] > 0 else "-"
+            movers = f"{s['movers']:,} ({s['movers_pct']:.1f}%)" if s['count'] > 0 else "—"
             table.add_row(name, s['range'], f"{s['count']:,}", share, movers)
             
     console.print(table)
@@ -158,55 +171,55 @@ def print_post_training_report(metrics_dict: dict, classifier, regressor, featur
     )
     
     perf_table = Table(
-        title="[bold]Model Evaluation Diagnostics[/bold]",
+        title="[bold white]2. MODEL EVALUATION & CONFORMAL COVERAGE DIAGNOSTICS[/bold white]",
         box=box.ROUNDED,
         header_style="bold magenta",
-        border_style="dim",
+        border_style="bright_black",
         expand=True
     )
-    perf_table.add_column("Evaluation Metric", style="bold white")
-    perf_table.add_column("Validation Set", justify="right", style="cyan")
-    perf_table.add_column("OOS Test Set", justify="right", style="green")
-    perf_table.add_column("Benchmark / Baseline", justify="right", style="dim")
+    perf_table.add_column("Diagnostic Performance Metric", style="bold white")
+    perf_table.add_column("Validation Partition", justify="right", style="cyan")
+    perf_table.add_column("Out-of-Sample Test Set", justify="right", style="bold green")
+    perf_table.add_column("Benchmark / Theoretical Baseline", justify="right", style="dim")
     
     mae_delta_val = ((val_base_mae - val_opt_mae) / val_base_mae) * 100.0
     mae_delta_test = ((test_base_mae - test_opt_mae) / test_base_mae) * 100.0
     
     perf_table.add_row(
-        "Hurdle-Gated MAE",
+        "Hurdle-Gated Forecast MAE",
         f"[bold]{val_opt_mae:.3f}%[/bold] ([green]-{mae_delta_val:.1f}%[/green])",
         f"[bold]{test_opt_mae:.3f}%[/bold] ([green]-{mae_delta_test:.1f}%[/green])",
-        f"Raw Regressor: {test_base_mae:.3f}%"
+        f"Raw Un-Gated Regressor: {test_base_mae:.3f}%"
     )
     perf_table.add_row(
-        "CQR Coverage (Target: 90.0%)",
+        "CQR Coverage Guarantee (Target: 90.0%)",
         f"{val_coverage:.2f}%",
-        f"{test_coverage:.2f}%",
-        f"Conformal Score q̂: {cqr_gen.q_hat_conformal:.3f}"
+        f"[bold green]{test_coverage:.2f}%[/bold green]",
+        f"Calibrated Conformal Score q̂: {cqr_gen.q_hat_conformal:.3f}"
     )
     perf_table.add_row(
-        "Triggered Execution Volume",
+        "Filtered Execution Trigger Volume",
         f"{val_active_count:,} / {len(X_val):,} ({val_active_pct:.2f}%)",
         f"{test_active_count:,} / {len(X_test):,} ({test_active_pct:.2f}%)",
-        "Filtered Signals"
+        "Selective Right-Tail Signals Only"
     )
     perf_table.add_row(
-        "Active Directional Accuracy",
-        "-",
+        "Active Signal Directional Win Rate",
+        "—",
         f"[bold green]{test_dir_acc:.1f}%[/bold green]",
-        "Target Return > 0.0%"
+        "Target Realized Return > 0.0%"
     )
     perf_table.add_row(
-        "Optimal Hurdle Spike Threshold",
+        "Optimal Hurdle Conviction Threshold (τ)",
         f"{metrics_dict['prob_threshold']:.4f}",
-        "-",
-        "Grid Range: [0.50, 0.98]"
+        "—",
+        "MAE Minimum over [0.50, 0.98]"
     )
     perf_table.add_row(
-        "Epistemic Variance Baseline",
+        "Epistemic Variance Baseline (σ²)",
         f"{metrics_dict['epistemic_var_baseline']:.4f}",
-        "-",
-        "Ensemble Trajectory Variance"
+        "—",
+        "Ensemble Sub-Sample Dispersion"
     )
     
     console.print(perf_table)
@@ -216,16 +229,16 @@ def print_post_training_report(metrics_dict: dict, classifier, regressor, featur
     reg_imp = pd.Series(regressor.feature_importances_, index=feature_cols).sort_values(ascending=False).head(5)
     
     feat_table = Table(
-        title="[bold]Key Predictor Attribution (Top 5 Gain Weights)[/bold]",
+        title="[bold white]3. FEATURE GAIN ATTRIBUTION (Top 5 Predictor Weights)[/bold white]",
         box=box.ROUNDED,
         header_style="bold yellow",
-        border_style="dim",
+        border_style="bright_black",
         expand=True
     )
     feat_table.add_column("Rank", justify="center", width=6, style="dim")
-    feat_table.add_column("Classifier Feature (Spike Gate)", style="cyan")
+    feat_table.add_column("Stage 1 Spike Classifier Gate", style="cyan")
     feat_table.add_column("Clf Gain", justify="right", style="cyan")
-    feat_table.add_column("Regressor Feature (Magnitude)", style="yellow")
+    feat_table.add_column("Stage 2 Magnitude SAEHL Regressor", style="yellow")
     feat_table.add_column("Reg Gain", justify="right", style="yellow")
     
     for i in range(5):
@@ -443,7 +456,7 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     summary_text = Text()
     summary_text.append("✔ Training pipeline completed successfully!\n", style="bold green")
     summary_text.append(f"• Model Path: {model_path} ({file_size_mb:.2f} MB)\n", style="white")
-    summary_text.append(f"• Total Elapsed Time: {duration:.2f}s  |  Status: Ready for Inference", style="dim")
+    summary_text.append(f"• Total Elapsed Time: {duration:.2f}s  |  Status: Ready for Production Inference", style="dim")
     
     console.print(Panel(summary_text, border_style="green", box=box.ROUNDED))
 

@@ -25,7 +25,6 @@ RAW_CARDS_CSV_PATH = BASE_DIR / "data" / "raw" / "cards.csv"
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-
 def log_step(title: str, step_num: str = ""):
     if HAS_RICH:
         t = Text()
@@ -36,7 +35,6 @@ def log_step(title: str, step_num: str = ""):
     else:
         prefix = f"[{step_num}] " if step_num else ""
         print(f"\n--- {prefix}{title} ---")
-
 
 def log_status(substep: str, passed: bool, message: str = ""):
     if HAS_RICH:
@@ -51,19 +49,19 @@ def log_status(substep: str, passed: bool, message: str = ""):
         extra = f" ({message})" if message else ""
         print(f"  [{status:<14}] {substep}{extra}")
 
-
 def check_step_a() -> bool:
     """Verify raw MTGJSON JSON/CSV downloads exist and are uncorrupted."""
-    if not RAW_JSON_PATH.exists() or not RAW_CARDS_CSV_PATH.exists():
-        log_status("Raw data feeds presence", False, "Missing AllPrices.json or cards.csv")
+    compressed_json = BASE_DIR / "data" / "raw" / "AllPrices.json.xz"
+    if not (RAW_JSON_PATH.exists() or compressed_json.exists()) or not RAW_CARDS_CSV_PATH.exists():
+        log_status("Raw data feeds presence", False, "Missing AllPrices.json(.xz) or cards.csv")
         return False
-    file_size_mb = RAW_JSON_PATH.stat().st_size / (1024 * 1024)
+    target = RAW_JSON_PATH if RAW_JSON_PATH.exists() else compressed_json
+    file_size_mb = target.stat().st_size / (1024 * 1024)
     if file_size_mb < 300:
         log_status("Raw file payload (>300MB)", False, f"{file_size_mb:.1f} MB found")
         return False
-    log_status("Raw data feeds presence", True, f"JSON: {file_size_mb:.1f} MB | CSV present")
+    log_status("Raw data feeds presence", True, f"Payload: {file_size_mb:.1f} MB | CSV present")
     return True
-
 
 def check_step_b(skip_freshness: bool = False) -> bool:
     if not DB_PATH.exists():
@@ -111,7 +109,6 @@ def check_step_b(skip_freshness: bool = False) -> bool:
         log_status("Database integrity check", False, str(e))
         return False
 
-
 def check_step_c() -> bool:
     if not DB_PATH.exists():
         log_status("Feature tables check", False, "Database missing")
@@ -141,7 +138,6 @@ def check_step_c() -> bool:
         log_status("Feature tables check", False, str(e))
         return False
 
-
 def check_step_d() -> bool:
     if not MODEL_PATH.exists():
         log_status("Model artifact file", False, "xgboost_forecast.joblib missing")
@@ -153,16 +149,14 @@ def check_step_d() -> bool:
             return False
         metrics = artifact["metrics"]
         mae = metrics.get("mae_pct", metrics.get("mae", 0.0))
-        naive_mae = metrics.get("naive_mae_pct", None)
         tau = metrics.get("prob_threshold", None)
         acc = metrics.get("directional_accuracy_pct", None)
-        edge_msg = f"MAE: {mae:.2f}% | Baseline: {naive_mae:.2f}% | tau: {tau} | DirAcc: {acc}%" if naive_mae else f"MAE: {mae:.2f}%"
+        edge_msg = f"MAE: {mae:.2f}% | tau: {tau} | DirAcc: {acc}%" if tau else f"MAE: {mae:.2f}%"
         log_status("Model artifact integrity", True, edge_msg)
         return True
     except Exception as e:
         log_status("Model artifact load", False, str(e))
         return False
-
 
 def execute_script(script_path: Path, extra_args: list = None):
     start_time = time.time()
@@ -174,43 +168,46 @@ def execute_script(script_path: Path, extra_args: list = None):
     else:
         print(f"Finished {script_path.name} in {elapsed:.2f}s\n")
 
-
 def print_header():
     if HAS_RICH:
         header_grid = Table.grid(expand=True)
         header_grid.add_column(justify="left", ratio=3)
         header_grid.add_column(justify="right", ratio=2)
         title = Text()
-        title.append("MTG QUANT ARBITRAGE TERMINAL", style="bold cyan")
+        title.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
         title.append(" │ ", style="dim white")
         title.append("Unified Pipeline Orchestrator", style="bold white")
+        title.append("\nAutomated Data Ingestion • Feature Generation • Model Training • Backtest", style="dim italic")
         meta = Text()
-        meta.append(f"Host: {sys.platform}  ", style="dim white")
-        meta.append("[Ready]", style="bold green")
+        meta.append(f"Platform: {sys.platform}  \n", style="dim white")
+        meta.append("Orchestrator: [bold green]Active[/bold green]")
         header_grid.add_row(title, meta)
         console.print(Panel(header_grid, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
         console.print()
     else:
         print("=" * 70)
-        print(" MTG QUANT ARBITRAGE TERMINAL │ UNIFIED PIPELINE ORCHESTRATOR")
+        print(" TIAMAT QUANT ARBITRAGE TERMINAL │ UNIFIED PIPELINE ORCHESTRATOR")
         print("=" * 70)
-
 
 def print_completion():
     if HAS_RICH:
-        table = Table(box=box.ROUNDED, border_style="green", expand=True, show_header=False)
-        table.add_column("Key", style="dim cyan", ratio=1)
-        table.add_column("Command", style="bold white", ratio=3)
-        table.add_row("Start Analytics API", "python src/api/main.py")
-        table.add_row("Start Terminal UI", "npm run dev")
+        table = Table(box=box.ROUNDED, border_style="green", expand=True, show_header=True, header_style="bold green")
+        table.add_column("Subsystem Service", style="bold white", ratio=2)
+        table.add_column("Terminal CLI Command", style="bold cyan", ratio=3)
+        table.add_column("Operational Function", style="dim", ratio=3)
+        table.add_row("Start Analytics API", "python src/api/main.py", "FastAPI Microservice (Port 8000)")
+        table.add_row("Start Terminal UI", "npm run dev", "Next.js 15 Web Client (Port 3000)")
+        table.add_row("Run Market Scanner", "python src/analytics/scan_market.py", "Live CLI Arbitrage & Alpha Scanner")
+        table.add_row("Execute Out-of-Time Backtest", "python src/analytics/backtest.py", "Scorecard & Loss Shield Evaluation")
         console.print(Panel(table, title="[bold green]PIPELINE EXECUTION COMPLETE[/bold green]", box=box.ROUNDED, border_style="green"))
     else:
         print("\n" + "=" * 70)
         print(" PIPELINE EXECUTION COMPLETE")
         print("  Start API server : python src/api/main.py")
         print("  Start Frontend   : npm run dev")
+        print("  Scan Market      : python src/analytics/scan_market.py")
+        print("  Run Backtest     : python src/analytics/backtest.py")
         print("=" * 70 + "\n")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Unified pipeline runner for secondary pricing ETL and forecasting pipeline")
@@ -241,7 +238,7 @@ def main():
             else:
                 print("  Raw data up to date. Skipping.\n")
 
-        log_step("DuckDB Ingestion", "STEP B")
+        log_step("DuckDB Ingestion & Hampel MAD Filter", "STEP B")
         if args.force or not check_step_b(skip_freshness=args.skip_freshness):
             execute_script(BASE_DIR / "src" / "etl" / "load_duckdb.py")
         else:
@@ -256,7 +253,7 @@ def main():
             print("Skipping Raw ETL stages.\n")
 
     if not args.train_only:
-        log_step("Feature Engineering", "STEP C")
+        log_step("Feature Store & Temporal ASOF Assembly", "STEP C")
         if args.force or args.analytics_only or args.build_only or not check_step_c():
             execute_script(BASE_DIR / "src" / "analytics" / "build_features.py")
         else:
@@ -266,7 +263,7 @@ def main():
                 print("  Feature store up to date. Skipping.\n")
 
     if not args.build_only:
-        log_step("Model Training", "STEP D")
+        log_step("Model Training & Conformal Calibration", "STEP D")
         if args.force or args.analytics_only or args.train_only or not check_step_d():
             execute_script(BASE_DIR / "src" / "analytics" / "train_forecast.py")
         else:
@@ -280,7 +277,6 @@ def main():
         execute_script(BASE_DIR / "src" / "analytics" / "backtest.py", ["--hurdle", str(args.hurdle)])
 
     print_completion()
-
 
 if __name__ == "__main__":
     main()

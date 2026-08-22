@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
-import { BookOpen, CornerDownLeft, Loader2, Search } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { CornerDownLeft, Loader2, Search } from "lucide-react"
 import { useSearch } from "@/lib/hooks"
 import { usd } from "@/lib/format"
 
@@ -9,14 +9,12 @@ interface CommandPaletteProps {
   open: boolean
   onClose: () => void
   onSelect: (uuid: string, finish?: string) => void
-  onOpenDocs?: () => void
 }
 
 export function CommandPalette({
   open,
   onClose,
   onSelect,
-  onOpenDocs,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
@@ -39,27 +37,11 @@ export function CommandPalette({
     return () => clearTimeout(handler)
   }, [query])
 
-  const cleanedQuery = query.trim().toLowerCase().replace(/^>/, "").trim()
-
-  const isDocCommand = useMemo(() => {
-    const docKeywords = [
-      "doc",
-      "docs",
-      "math",
-      "methodology",
-      "whitepaper",
-      "help",
-      "citations",
-      "formula",
-    ]
-    return docKeywords.includes(cleanedQuery) || query.trim().startsWith(">")
-  }, [cleanedQuery, query])
-
   const { data: results = [], isLoading } = useSearch(debouncedQuery)
   const isDebouncing = query.trim() !== debouncedQuery.trim()
   const isSearching = (isLoading || isDebouncing) && query.trim().length >= 2
 
-  const totalItems = (isDocCommand ? 1 : 0) + (isSearching ? 0 : results.length)
+  const totalItems = isSearching ? 0 : results.length
 
   useEffect(() => {
     setActive(0)
@@ -80,14 +62,7 @@ export function CommandPalette({
       setActive((a) => Math.max(a - 1, 0))
     } else if (e.key === "Enter") {
       e.preventDefault()
-      if (isDocCommand && active === 0) {
-        onClose()
-        onOpenDocs?.()
-        return
-      }
-
-      const cardIdx = isDocCommand ? active - 1 : active
-      const pick = results[cardIdx]
+      const pick = results[active]
       if (pick) {
         onSelect(pick.uuid, pick.finish)
         onClose()
@@ -119,9 +94,9 @@ export function CommandPalette({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="Resolve asset or type '> docs' · e.g. Ragavan, Mox, > math…"
+            placeholder="Resolve asset… e.g. Ragavan, Mox, Black Lotus…"
             className="w-full bg-transparent py-3 text-[13px] text-foreground outline-none placeholder:text-dim"
-            aria-label="Card name or command query"
+            aria-label="Card name search query"
           />
           <kbd className="rounded-sm border border-border bg-panel px-1 py-0.5 text-[10px] text-dim">
             ESC
@@ -129,39 +104,9 @@ export function CommandPalette({
         </div>
 
         <div className="max-h-[52vh] overflow-y-auto">
-          {isDocCommand && (
-            <button
-              type="button"
-              onMouseEnter={() => setActive(0)}
-              onClick={() => {
-                onClose()
-                onOpenDocs?.()
-              }}
-              className={`flex w-full items-center gap-3 border-b border-border/40 px-3 py-2.5 text-left text-[12px] transition-colors ${
-                active === 0 ? "bg-accent/15" : "hover:bg-surface-2/60"
-              }`}
-            >
-              <BookOpen className="h-4 w-4 shrink-0 text-accent" />
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-accent">
-                  System Methodology & Mathematical Grounding
-                </div>
-                <div className="text-[10px] text-dim">
-                  View Two-Stage Hurdle ML proofs, ASOF ETL specs, and rate cards
-                </div>
-              </div>
-              <span className="rounded-sm border border-accent/40 bg-accent/10 px-1 py-0.5 font-mono text-[9px] text-accent">
-                DOCS
-              </span>
-              {active === 0 && (
-                <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-accent" />
-              )}
-            </button>
-          )}
-
-          {!isDocCommand && query.trim().length < 2 && (
+          {query.trim().length < 2 && (
             <p className="px-3 py-4 text-[11px] text-dim">
-              Type at least 2 characters to search, or &quot;&gt; docs&quot; to inspect system methodology.
+              Type at least 2 characters to search across catalog.
             </p>
           )}
 
@@ -173,7 +118,6 @@ export function CommandPalette({
           )}
 
           {!isSearching &&
-            !isDocCommand &&
             query.trim().length >= 2 &&
             results.length === 0 && (
               <p className="px-3 py-4 text-[11px] text-dim">
@@ -183,14 +127,13 @@ export function CommandPalette({
 
           {!isSearching &&
             results.map((r, i) => {
-              const itemIdx = isDocCommand ? i + 1 : i
-              const isItemActive = itemIdx === active
+              const isItemActive = i === active
 
               return (
                 <button
                   key={`${r.uuid}-${r.finish}-${i}`}
                   type="button"
-                  onMouseEnter={() => setActive(itemIdx)}
+                  onMouseEnter={() => setActive(i)}
                   onClick={() => {
                     onSelect(r.uuid, r.finish)
                     onClose()
@@ -233,10 +176,9 @@ export function CommandPalette({
 
         <div className="flex items-center gap-3 border-t border-border-strong bg-panel px-3 py-1.5 text-[10px] uppercase text-dim">
           <span>↑↓ Navigate</span>
-          <span>↵ Load asset / Execute</span>
+          <span>↵ Load asset</span>
           <span className="ml-auto">
-            {isDocCommand ? results.length + 1 : results.length} result
-            {results.length === 1 && !isDocCommand ? "" : "s"}
+            {results.length} result{results.length === 1 ? "" : "s"}
           </span>
         </div>
       </div>

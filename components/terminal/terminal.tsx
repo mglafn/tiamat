@@ -8,7 +8,6 @@ import { ForecastPanel } from './forecast-panel'
 import { TelemetryPanel } from './telemetry-panel'
 import { QueryConsole } from './query-console'
 import { CommandPalette } from './command-palette'
-import { MethodologyModal } from './methodology-modal'
 
 export function Terminal() {
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null)
@@ -16,16 +15,13 @@ export function Terminal() {
   const [minSpread, setMinSpread] = useState(0)
   const [finish, setFinish] = useState('all')
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [docsOpen, setDocsOpen] = useState(false)
   const [stagedUuids, setStagedUuids] = useState<Set<string>>(new Set())
 
-  const currentMode = docsOpen
-    ? 'DOCS'
-    : paletteOpen
-      ? 'SEARCH'
-      : stagedUuids.size > 0
-        ? 'BATCH'
-        : 'NORMAL'
+  const currentMode = paletteOpen
+    ? 'SEARCH'
+    : stagedUuids.size > 0
+      ? 'BATCH'
+      : 'NORMAL'
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -35,9 +31,6 @@ export function Terminal() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((o) => !o)
-      } else if (e.key === '?' || ((e.metaKey || e.ctrlKey) && e.key === '/')) {
-        e.preventDefault()
-        setDocsOpen((d) => !d)
       }
     }
 
@@ -66,7 +59,6 @@ export function Terminal() {
     <div className="grid-scan flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       <StatusBar
         onOpenSearch={() => setPaletteOpen(true)}
-        onOpenDocs={() => setDocsOpen(true)}
         mode={currentMode}
       />
 
@@ -111,12 +103,6 @@ export function Terminal() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onSelect={handleSelect}
-        onOpenDocs={() => setDocsOpen(true)}
-      />
-
-      <MethodologyModal
-        open={docsOpen}
-        onClose={() => setDocsOpen(false)}
       />
     </div>
   )

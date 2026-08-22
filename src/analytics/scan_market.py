@@ -53,8 +53,8 @@ def smooth_asymmetric_huber_objective(y_true, y_pred):
     
     grad = dw * l_huber + w * dl_huber
     hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    
     hess = np.maximum(hess, 1e-6)
+    
     return grad, hess
 
 class ConformalizedLowerBoundGenerator:
@@ -155,35 +155,51 @@ def render_market_scan_report(payload: dict):
     header = Table.grid(expand=True)
     header.add_column(justify="left", ratio=3)
     header.add_column(justify="right", ratio=2)
+    
     title_text = Text()
     title_text.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
     title_text.append(" │ ", style="dim white")
     title_text.append("Live Market Opportunity Scanner", style="bold white")
+    title_text.append("\nCross-Venue Spatial Arbitrage & CQR-Gated Directional Alpha", style="dim italic")
+    
     meta_text = Text()
     meta_text.append(f"Market Date: {meta['latest_date']}\n", style="dim white")
     meta_text.append(f"Universe: {meta['scanned_universe']:,} Active SKUs  ", style="dim white")
     meta_text.append("[CQR Risk Shield Active]", style="bold green")
+    
     header.add_row(title_text, meta_text)
     console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
+    console.print()
     
     funnel_table = Table(
         box=box.ROUNDED,
         header_style="bold blue",
-        border_style="dim",
+        border_style="bright_black",
         expand=True,
         title="[bold white]1. LIVE DEFENSIVE SIGNAL FUNNEL[/bold white]"
     )
     funnel_table.add_column("Scanning / Vetting Stage", style="bold white")
     funnel_table.add_column("Passing Candidates", justify="right", style="cyan")
-    funnel_table.add_column("Funnel Retention", justify="right", style="dim")
+    funnel_table.add_column("Funnel Retention", justify="right", style="bold yellow")
+    funnel_table.add_column("Gate Constraint", style="dim")
     
     tot = meta['scanned_universe']
+    descriptions = {
+        "Total Scanned Active SKUs": "Unfiltered live active catalog records",
+        "Stage 1 Spike Mover (τ)": f"Upward right-tail breakout probability (P >= {meta.get('prob_threshold', 0.90):.2f})",
+        "CQR LPB Floor Passed (≥ -15%)": "Distribution-free conformal lower prediction bound >= -15%",
+        "Set Decay Filter Passed (≥ -0.5%/d)": "Price decay derivative >= -0.50%/day (Knife Filter)",
+        "Net ROI Hurdle Cleared": f"Expected net ROI >= {meta.get('min_net_roi_pct', 8.0):.1f}%"
+    }
     for stage, count in funnel.items():
-        pct = f"{(count / tot) * 100:.2f}%" if tot > 0 else "0%"
-        funnel_table.add_row(stage, f"{count:,}", pct)
+        pct = f"{(count / tot) * 100:.3f}%" if tot > 0 else "0%"
+        desc = descriptions.get(stage, "Analytical filter")
+        funnel_table.add_row(stage, f"{count:,}", pct, desc)
+        
     console.print(funnel_table)
     console.print()
     
+    # 2. Instantaneous Spatial Arbitrage (0-Day Locked Profit)
     if len(spatial_arbs) > 0:
         arb_table = Table(
             title=f"[bold white]2. INSTANTANEOUS SPATIAL ARBITRAGE (Showing Top {len(spatial_arbs)} Locked Spreads)[/bold white]",
@@ -194,7 +210,7 @@ def render_market_scan_report(payload: dict):
         )
         arb_table.add_column("Card SKU / Name", style="bold white", max_width=26, overflow="ellipsis")
         arb_table.add_column("Set", justify="center", style="cyan")
-        arb_table.add_column("Finish", justify="center", style="dim yellow")
+        arb_table.add_column("Finish", justify="center", style="yellow")
         arb_table.add_column("TCG Retail", justify="right")
         arb_table.add_column("Landed Cost", justify="right", style="dim")
         arb_table.add_column("CK Credit", justify="right", style="cyan")
@@ -227,7 +243,7 @@ def render_market_scan_report(payload: dict):
         )
         alpha_table.add_column("Card SKU / Name", style="bold white", max_width=24, overflow="ellipsis")
         alpha_table.add_column("Set", justify="center", style="cyan")
-        alpha_table.add_column("Finish", justify="center", style="dim yellow")
+        alpha_table.add_column("Finish", justify="center", style="yellow")
         alpha_table.add_column("Close", justify="right")
         alpha_table.add_column("Pred Gain", justify="right", style="yellow")
         alpha_table.add_column("CQR Floor", justify="right", style="green")
@@ -262,7 +278,7 @@ def render_market_scan_report(payload: dict):
         )
         trap_table.add_column("Card SKU / Name", style="bold white", max_width=24, overflow="ellipsis")
         trap_table.add_column("Set", justify="center", style="cyan")
-        trap_table.add_column("Finish", justify="center", style="dim yellow")
+        trap_table.add_column("Finish", justify="center", style="yellow")
         trap_table.add_column("Price", justify="right", style="dim")
         trap_table.add_column("ML Pred %", justify="right", style="yellow")
         trap_table.add_column("CQR Floor", justify="right", style="dim")
@@ -385,10 +401,7 @@ def scan_live_market(
     
     if sizing == "kelly":
         market_df['allocated_units'] = compute_uncertainty_kelly_units(
-            market_df['exp_net_roi_pct'],
-            market_df['cqr_lpb'],
-            market_df['basis'],
-            market_df['amihud_illiquidity_30d']
+            market_df['exp_net_roi_pct'], market_df['cqr_lpb'], market_df['basis'], market_df['amihud_illiquidity_30d']
         )
     else:
         market_df['allocated_units'] = 1.0

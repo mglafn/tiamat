@@ -1,18 +1,16 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { BookOpen, Search } from 'lucide-react'
+import { Search } from 'lucide-react'
 import { useHealth } from '@/lib/hooks'
 
 interface StatusBarProps {
   onOpenSearch: () => void
-  onOpenDocs: () => void
-  mode?: 'NORMAL' | 'BATCH' | 'SEARCH' | 'DOCS'
+  mode?: 'NORMAL' | 'BATCH' | 'SEARCH'
 }
 
 export function StatusBar({
   onOpenSearch,
-  onOpenDocs,
   mode = 'NORMAL',
 }: StatusBarProps) {
   const [clock, setClock] = useState('--:--:--')
@@ -40,9 +38,7 @@ export function StatusBar({
               ? 'bg-warn text-warn-foreground'
               : mode === 'SEARCH'
                 ? 'bg-accent text-accent-foreground'
-                : mode === 'DOCS'
-                  ? 'bg-accent/20 text-accent'
-                  : 'bg-surface-2 text-foreground'
+                : 'bg-surface-2 text-foreground'
           }`}
         >
           {mode}
@@ -68,18 +64,6 @@ export function StatusBar({
       </span>
 
       <div className="ml-auto flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onOpenDocs}
-          className="flex items-center gap-1.5 rounded-sm border border-accent/40 bg-accent/10 px-2 py-0.5 font-semibold text-accent transition-colors hover:bg-accent/20"
-        >
-          <BookOpen className="h-3 w-3" />
-          <span>Docs</span>
-          <kbd className="rounded-sm border border-accent/30 bg-background/50 px-1 text-[9px]">
-            ?
-          </kbd>
-        </button>
-
         <button
           type="button"
           onClick={onOpenSearch}
