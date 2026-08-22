@@ -57,31 +57,31 @@ def create_production_snapshot():
             CREATE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
         """)
 
-        # 1. Keep ALL active arbitrage opportunities
+        # 1. Keep ALL active spatial arbitrage opportunities
         conn.execute("""
             CREATE TABLE fact_arbitrage_opportunities AS
             SELECT * FROM src.fact_arbitrage_opportunities;
         """)
 
-        # 2. Target universe: Top 1,000 EDHREC staples + Reserved List + All Arb Cards
+        # 2. Target universe: Top 2,500 EDHREC staples + Reserved List + All Arb Cards
         conn.execute("""
             CREATE TEMP TABLE target_tracked_cards AS
             SELECT DISTINCT uuid FROM src.fact_arbitrage_opportunities
             UNION
             SELECT uuid FROM src.dim_cards
-            WHERE (edhrec_rank IS NOT NULL AND edhrec_rank <= 1000)
+            WHERE (edhrec_rank IS NOT NULL AND edhrec_rank <= 2500)
                OR is_reserved = true;
         """)
 
-        # 3. Features: Last 21 days of history for tracked cards ONLY
+        # 3. Features: Last 60 days of history (Preserves 30-day SMA & 20-day Bollinger Bands)
         conn.execute("""
             CREATE TABLE fact_card_features AS
             SELECT f.* FROM src.fact_card_features f
             JOIN target_tracked_cards t ON f.uuid = t.uuid
-            WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 21 DAY FROM src.fact_card_features);
+            WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 60 DAY FROM src.fact_card_features);
         """)
 
-        # 4. Enriched Dimension Table (tracked cards only)
+        # 4. Enriched Dimension Table (Tracked Cards Only)
         conn.execute("""
             CREATE TABLE dim_cards AS
             SELECT
@@ -93,7 +93,7 @@ def create_production_snapshot():
               AND d.uuid IN (SELECT DISTINCT uuid FROM target_tracked_cards);
         """)
 
-        # 5. Latest Retail Price points for summary cards
+        # 5. Latest Retail Price points for summary & search resolution
         conn.execute("""
             CREATE TABLE fact_prices AS
             WITH ranked_prices AS (
@@ -106,7 +106,6 @@ def create_production_snapshot():
                 FROM src.fact_prices
                 WHERE format = 'paper'
                   AND list_type = 'retail'
-                  AND vendor IN ('tcgplayer', 'cardkingdom', 'starcitygames')
                   AND uuid IN (SELECT uuid FROM dim_cards)
             )
             SELECT uuid, format, vendor, list_type, finish, price_date, price
@@ -114,11 +113,20 @@ def create_production_snapshot():
             WHERE rn = 1;
         """)
 
-        # 6. Analytical indexes
+        # 6. Preserved Out-of-Time Test Set for Backtesting & Strategy Lab UI (Fixes /api/v1/backtest 500 error)
+        conn.execute("""
+            CREATE TABLE fact_training_dataset AS
+            SELECT * FROM src.fact_training_dataset
+            WHERE price_date >= (SELECT MAX(price_date) - INTERVAL 45 DAY FROM src.fact_training_dataset);
+        """)
+
+        # 7. Secondary Indexes for <5ms API Lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, finish);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_features_lookup ON fact_card_features(uuid, finish);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_features_date ON fact_card_features(price_date);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_date ON fact_training_dataset(price_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
 
         conn.execute("CHECKPOINT;")
