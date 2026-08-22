@@ -51,17 +51,17 @@ export interface PredictionResponse {
   predicted_gain_pct: number
   model_mae: number
   move_prob: number
-  cqr_lpb: number
-  price_decay_velocity_3d: number
-  amihud_illiquidity_30d: number
+  cqr_lpb?: number
+  price_decay_velocity_3d?: number
+  amihud_illiquidity_30d?: number
   directional_accuracy_pct?: number | null
   expected_net_payout?: number | null
   net_expected_roi_pct?: number | null
   is_dead_zone_clamped?: boolean | null
   kappa_risk?: number | null
-  allocated_kelly_units: number
-  is_defensive_vetoed: boolean
-  veto_reasons: string[]
+  allocated_kelly_units?: number
+  is_defensive_vetoed?: boolean
+  veto_reasons?: string[]
 }
 
 export interface CardMarketSummary {
@@ -103,17 +103,20 @@ export interface BacktestSummary {
   test_start_date: string
   test_end_date: string
   test_universe_count: number
+  avg_trade_roi?: number
 }
 
 export interface BacktestAblation {
   naive_trades: number
   naive_profit: number
+  naive_win_rate?: number
 }
 
 export interface BacktestTrade {
   uuid: string
   name: string
   set_code: string
+  collector_number?: string | null
   finish: string
   price_date: string
   current_price: number
@@ -135,6 +138,7 @@ export interface BacktestResponse {
     sizing: string
     top_daily: number
     is_pro: boolean
+    sort_by?: string
   }
   funnel: Record<string, number>
   summary: BacktestSummary
