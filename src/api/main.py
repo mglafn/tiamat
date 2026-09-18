@@ -190,7 +190,7 @@ async def lifespan(app: FastAPI):
         banner_grid.add_column(justify="right", ratio=2)
         
         title = Text()
-        title.append("TIAMAT QUANT ARBITRAGE ENGINE", style="bold cyan")
+        title.append("TIAMAT QUANT INTERFACE", style="bold cyan")
         title.append(" │ ", style="dim white")
         title.append("FastAPI Microservice Engine", style="bold white")
         title.append("\nVectorized DuckDB OLAP • Asymmetric CQR Forecaster • Spatial Order Book", style="dim italic")
@@ -421,12 +421,14 @@ def get_forecast(
     try:
         row = db_conn.cursor().execute(query, [card_uuid, normalized_finish]).fetchone()
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error reading feature store: {str(e)}")
         
     if not row:
         raise HTTPException(status_code=404, detail=f"Pricing metrics not found for finish '{finish}'.")
         
-    current_price, active_vendor, feature_vals = float(row[0]), row[1], row[2:]
+    current_price, active_vendor, feature_vals = float(row[0]) if row[0] is not None else 0.0, row[1], row[2:]
     input_df = sanitize_features_for_inference(feature_cols, feature_vals)
     
     metrics = model_artifact.get("metrics", {})
@@ -439,12 +441,16 @@ def get_forecast(
     cqr_generator = model_artifact.get("cqr_generator")
     
     move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
+    if pd.isna(move_prob): move_prob = 0.0
+
     predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
+    if pd.isna(predicted_gain_pct): predicted_gain_pct = 0.0
     
     if cqr_generator:
         cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0])
     else:
         cqr_lpb = predicted_gain_pct - 10.0
+    if pd.isna(cqr_lpb): cqr_lpb = 0.0
         
     predicted_7d_price = max(0.01, round(current_price * (1.0 + (predicted_gain_pct / 100.0)), 2))
     model_mae_dollars = round(current_price * (mae_pct / 100.0), 4)
@@ -467,8 +473,11 @@ def get_forecast(
     exp_net_profit = (move_prob * profit_win) + ((1.0 - move_prob) * profit_fail)
     net_expected_roi_pct = (exp_net_profit / basis) * 100.0 if basis > 0 else 0.0
     
-    decay_3d = float(input_df['price_decay_velocity_3d'].iloc[0]) if 'price_decay_velocity_3d' in input_df else 0.0
-    amihud_val = float(input_df['amihud_illiquidity_30d'].iloc[0]) if 'amihud_illiquidity_30d' in input_df else 0.0
+    decay_3d = float(input_df.get('price_decay_velocity_3d', pd.Series([0.0])).iloc[0])
+    if pd.isna(decay_3d): decay_3d = 0.0
+
+    amihud_val = float(input_df.get('amihud_illiquidity_30d', pd.Series([0.0])).iloc[0])
+    if pd.isna(amihud_val): amihud_val = 0.0
     
     est_downside = max(0.05, (predicted_gain_pct - cqr_lpb) / 100.0)
     est_upside = max(0.05, predicted_gain_pct / 100.0)
@@ -477,7 +486,10 @@ def get_forecast(
     dollar_kelly = f_kelly * 10000.0
     amihud_cap = 0.02 / max(amihud_val, 1e-5)
     final_dollar = min(dollar_kelly, 50.0, amihud_cap)
-    allocated_units = int(max(1.0, np.floor(final_dollar / max(basis, 0.01))))
+    
+    # Safe allocation conversion against NaNs
+    allocated_units_raw = max(1.0, np.floor(final_dollar / max(basis, 0.01)))
+    allocated_units = 1 if pd.isna(allocated_units_raw) else int(allocated_units_raw)
     
     veto_reasons = []
     if move_prob < prob_threshold:
@@ -512,7 +524,6 @@ def get_forecast(
         is_defensive_vetoed=len(veto_reasons) > 0,
         veto_reasons=veto_reasons
     )
-
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(0.00), finish: Optional[str] = Query(None), limit: int = Query(100, le=500),

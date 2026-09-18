@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 from pathlib import Path
 import duckdb
 
@@ -15,39 +16,44 @@ except ImportError:
     HAS_RICH = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-FULL_DB = BASE_DIR / "data" / "mtg_prices_full.duckdb"
 PROD_DB = BASE_DIR / "data" / "mtg_prices.duckdb"
+TEMP_SRC_DB = BASE_DIR / "data" / "mtg_prices_unpruned_tmp.duckdb"
 
 
 def create_production_snapshot():
-    src_db = FULL_DB if FULL_DB.exists() else PROD_DB
-    if not src_db.exists():
+    # Detect if there's a stale FULL_DB causing issues and warn about it
+    legacy_full_db = BASE_DIR / "data" / "mtg_prices_full.duckdb"
+    if legacy_full_db.exists():
         if HAS_RICH:
-            console.print(
-                f"[bold red]Error:[/bold red] Source database not found at [yellow]{src_db}[/yellow]"
-            )
+            console.print(f"[bold yellow]Warning:[/bold yellow] Found stale {legacy_full_db.name}. Ignoring it to prevent schema regression.")
+    
+    if not PROD_DB.exists():
+        if HAS_RICH:
+            console.print(f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]")
         else:
-            print(f"Source database not found at {src_db}", file=sys.stderr)
+            print(f"Active database not found at {PROD_DB}", file=sys.stderr)
         sys.exit(1)
 
-    initial_size_mb = src_db.stat().st_size / (1024 * 1024)
+    initial_size_mb = PROD_DB.stat().st_size / (1024 * 1024)
 
     if HAS_RICH:
         console.print(
             Panel(
                 f"[bold white]DuckDB Snapshot Pruning Engine (<50MB Budget Target)[/bold white]\n"
-                f"[dim]Source: {src_db} ({initial_size_mb:.2f} MB)[/dim]",
+                f"[dim]Source: {PROD_DB} ({initial_size_mb:.2f} MB)[/dim]",
                 box=box.ROUNDED,
                 border_style="cyan",
             )
         )
 
-    temp_prod = BASE_DIR / "data" / "mtg_prices_pruned.duckdb"
-    if temp_prod.exists():
-        os.remove(temp_prod)
+    # 1. Safely move the active DB to a temporary source file
+    if TEMP_SRC_DB.exists():
+        os.remove(TEMP_SRC_DB)
+    shutil.move(str(PROD_DB), str(TEMP_SRC_DB))
 
+    # 2. Connect to what will become the NEW lightweight PROD_DB
     conn = duckdb.connect(
-        str(temp_prod),
+        str(PROD_DB),
         config={
             "max_memory": "1.5GB",
             "threads": "2",
@@ -56,26 +62,26 @@ def create_production_snapshot():
     )
 
     try:
-        conn.execute(f"ATTACH '{src_db.as_posix()}' AS src (READ_ONLY);")
+        conn.execute(f"ATTACH '{TEMP_SRC_DB.as_posix()}' AS src (READ_ONLY);")
 
         conn.execute(
             """
             CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
             CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
             CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
-            CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
         """
         )
 
-        # 1. Keep ALL active arbitrage opportunities
+        # Keep ALL active arbitrage opportunities (Cast finish to VARCHAR to prevent orphaned ENUMs)
         conn.execute(
             """
             CREATE TABLE fact_arbitrage_opportunities AS
-            SELECT * FROM src.fact_arbitrage_opportunities;
+            SELECT * EXCLUDE (finish), CAST(finish AS VARCHAR) AS finish 
+            FROM src.fact_arbitrage_opportunities;
         """
         )
 
-        # 2. Target universe: Top 700 EDHREC staples + Reserved List + All Arb Cards
+        # Target universe: Top 700 EDHREC staples + Reserved List + All Arb Cards
         conn.execute(
             """
             CREATE TEMP TABLE target_tracked_cards AS
@@ -87,17 +93,18 @@ def create_production_snapshot():
         """
         )
 
-        # 3. Features: 14 days rolling window for tracked cards (saving ~35% row volume)
+        # Features: 14 days rolling window for tracked cards (saving ~35% row volume)
         conn.execute(
             """
             CREATE TABLE fact_card_features AS
-            SELECT f.* FROM src.fact_card_features f
+            SELECT f.* EXCLUDE (finish), CAST(f.finish AS VARCHAR) AS finish 
+            FROM src.fact_card_features f
             JOIN target_tracked_cards t ON f.uuid = t.uuid
             WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 14 DAY FROM src.fact_card_features);
         """
         )
 
-        # 4. Enriched Dimension Table (tracked cards only)
+        # Enriched Dimension Table (tracked cards only)
         conn.execute(
             """
             CREATE TABLE dim_cards AS
@@ -111,13 +118,13 @@ def create_production_snapshot():
         """
         )
 
-        # 5. Latest Retail Price points for fast lookups
+        # Latest Retail Price points for fast lookups
         conn.execute(
             """
             CREATE TABLE fact_prices AS
             WITH ranked_prices AS (
                 SELECT
-                    uuid, format, vendor, list_type, finish, price_date, price,
+                    uuid, format, vendor, list_type, CAST(finish AS VARCHAR) AS finish, price_date, price,
                     ROW_NUMBER() OVER (
                         PARTITION BY uuid, finish, vendor
                         ORDER BY price_date DESC
@@ -134,21 +141,20 @@ def create_production_snapshot():
         """
         )
 
-        # 6. Lean essential indexes (let DuckDB zonemaps handle sequential scans)
+        # Lean essential indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
 
         conn.execute("CHECKPOINT;")
         conn.execute("VACUUM;")
         conn.execute("DETACH src;")
         conn.close()
 
-        if PROD_DB.exists():
-            os.remove(PROD_DB)
-        os.rename(temp_prod, PROD_DB)
+        # Clean up the unpruned temp source file
+        if TEMP_SRC_DB.exists():
+            os.remove(TEMP_SRC_DB)
+
         size_mb = PROD_DB.stat().st_size / (1024 * 1024)
 
         if HAS_RICH:
@@ -178,9 +184,14 @@ def create_production_snapshot():
             )
         else:
             print(f"Production snapshot ready: {PROD_DB} ({size_mb:.2f} MB)")
+
     except Exception as e:
-        if temp_prod.exists():
-            os.remove(temp_prod)
+        # Rollback safely if something breaks
+        conn.close()
+        if TEMP_SRC_DB.exists():
+            if PROD_DB.exists():
+                os.remove(PROD_DB)
+            shutil.move(str(TEMP_SRC_DB), str(PROD_DB))
         raise e
 
 
