@@ -92,7 +92,7 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPan
             {/* SKU Overview */}
             <div className="border-b border-border/60 bg-surface/40 p-3 font-mono">
               <div className="flex items-center justify-between text-[10px] uppercase text-dim">
-                <span>Selected Instrument</span>
+                <span>Selected Card</span>
                 {collectorNum && <span className="text-dim">{collectorNum}</span>}
               </div>
               <div className="mt-0.5 text-pretty text-[13px] font-semibold text-accent">{name}</div>
@@ -297,7 +297,7 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPan
                   <Slider label="ROI Hurdle" value={hurdle} min={0} max={40} step={1} suffix="%" onChange={setHurdle} />
                   <Slider label="Sales Tax" value={taxRate} min={0} max={12} step={0.5} suffix="%" onChange={setTaxRate} />
                   <Slider label="Outbound Freight" value={freight} min={0} max={0.5} step={0.01} prefix="$" onChange={setFreight} />
-                  <Slider label="Condition κ" value={kappa} min={80} max={100} step={0.5} suffix="%" onChange={setKappa} />
+                  <Slider label="Intake Grade SLA" value={kappa} min={80} max={100} step={0.5} suffix="%" onChange={setKappa} />
                 </div>
               </>
             )}

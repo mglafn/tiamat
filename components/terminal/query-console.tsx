@@ -63,7 +63,7 @@ export function QueryConsole() {
           </span>
         ) : (
           <span className="text-foreground/90">
-            Columnar DuckDB mounted · Temporal ASOF alignment active · Pure chronological 14D embargo verified
+            DuckDB Storage Engine Active
           </span>
         )}
       </div>

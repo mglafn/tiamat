@@ -7,7 +7,7 @@ const geistSans = Geist({ subsets: ['latin'], variable: '--font-geist-sans' })
 const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono' })
 
 export const metadata: Metadata = {
-  title: 'MTG Quant Terminal · Arbitrage & Forecast Engine',
+  title: 'MTG Quant Terminal',
   description:
     'Real-time cross-vendor arbitrage order book and XGBoost 7-day price forecasting for secondary-market Magic singles. Powered by DuckDB analytical windowing.',
   generator: 'v0.app',

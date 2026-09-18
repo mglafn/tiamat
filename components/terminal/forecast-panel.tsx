@@ -382,7 +382,7 @@ export function ForecastPanel({
                 textAnchor="middle"
                 className="fill-accent text-[9px] font-bold uppercase tracking-wider"
               >
-                ASOF NOW
+                TODAY
               </text>
             </g>
 
@@ -545,7 +545,7 @@ export function ForecastPanel({
           </span>
 
           <span className="text-dim">
-            CQR LPB:{" "}
+            Safety Floor:{" "}
             <strong
               className={`font-semibold ${
                 (forecast?.cqr_lpb || 0) >= -15.0 ? "text-up" : "text-warn"
@@ -561,7 +561,7 @@ export function ForecastPanel({
           {forecast?.is_defensive_vetoed ? (
             <span className="inline-flex items-center gap-1 rounded-[2px] border border-warn/40 bg-warn/10 px-2 py-0.5 text-[9px] font-semibold text-warn">
               <ShieldAlert className="h-3 w-3" />
-              <span>DEFENSIVE VETO ACTIVE</span>
+              <span>TRADE BLOCKED</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 rounded-[2px] border border-up/40 bg-up/10 px-2 py-0.5 text-[9px] font-semibold text-up">
