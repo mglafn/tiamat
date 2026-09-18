@@ -50,7 +50,7 @@ export interface PredictionResponse {
   predicted_7d_price: number
   predicted_gain_pct: number
   model_mae: number
-  move_prob: number
+  move_prob?: number
   cqr_lpb?: number
   price_decay_velocity_3d?: number
   amihud_illiquidity_30d?: number
@@ -104,12 +104,45 @@ export interface BacktestSummary {
   test_end_date: string
   test_universe_count: number
   avg_trade_roi?: number
+  avg_kelly?: number
+  profit_factor?: number
 }
 
 export interface BacktestAblation {
   naive_trades: number
   naive_profit: number
   naive_win_rate?: number
+  naive_capital?: number
+  naive_roi?: number
+  alpha_cash?: number
+  alpha_roi_bps?: number
+  capital_saved?: number
+  capital_saved_pct?: number
+  vetoed_losses_avoided?: number
+}
+export interface BacktestEquityPoint {
+  date?: string
+  equity?: number
+  cash?: number
+  drawdown?: number
+  benchmark?: number
+  [key: string]: any
+}
+
+export interface VetoedTrap {
+  uuid: string
+  name: string
+  set_code: string
+  collector_number?: string | null
+  finish?: string
+  current_price?: number
+  pred_magnitude?: number
+  cqr_lpb?: number
+  exp_net_roi_pct?: number
+  exp_exit_payout?: number
+  allocated_units?: number
+  veto_reason?: string
+  [key: string]: any
 }
 
 export interface BacktestTrade {
@@ -127,6 +160,9 @@ export interface BacktestTrade {
   total_profit: number
   net_roi_pct: number
   is_win: boolean
+  pred_magnitude?: number
+  move_prob?: number
+  kelly_fraction?: number
 }
 
 export interface BacktestResponse {
@@ -140,9 +176,11 @@ export interface BacktestResponse {
     is_pro: boolean
     sort_by?: string
   }
-  funnel: Record<string, number>
+  funnel?: Record<string, number>
   summary: BacktestSummary
   ablation: BacktestAblation
   top_trades: BacktestTrade[]
   worst_trades: BacktestTrade[]
+  equity_curve?: BacktestEquityPoint[]
+  vetoed_traps?: VetoedTrap[]
 }
