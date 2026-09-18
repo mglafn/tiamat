@@ -60,7 +60,7 @@ export function StatusBar({
         tone={modelReady ? 'text-up' : 'text-warn'}
       />
       <span className="hidden text-dim sm:inline">
-        Feed <span className="text-accent">Persistent IPC</span>
+        Feed <span className="text-accent">LOCAL API</span>
       </span>
 
       <div className="ml-auto flex items-center gap-2">

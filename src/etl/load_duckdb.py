@@ -12,6 +12,7 @@ try:
     from rich.table import Table
     from rich.text import Text
     from rich import box
+
     HAS_RICH = True
     console = Console()
 except ImportError:
@@ -26,7 +27,10 @@ try:
 except ImportError:
     from src.etl.extract_prices import stream_mtg_prices
 
-def parse_and_batch_records(raw_file_path: Path, batch_size: int = 50000) -> Generator[pd.DataFrame, None, None]:
+
+def parse_and_batch_records(
+    raw_file_path: Path, batch_size: int = 50000
+) -> Generator[pd.DataFrame, None, None]:
     records_batch = []
     for uuid, price_data in stream_mtg_prices(str(raw_file_path)):
         if not isinstance(price_data, dict):
@@ -52,41 +56,63 @@ def parse_and_batch_records(raw_file_path: Path, batch_size: int = 50000) -> Gen
                                 continue
                             if price_float <= 0.0:
                                 continue
-                            
-                            records_batch.append((
-                                str(uuid),
-                                str(card_format),
-                                str(vendor),
-                                str(list_type),
-                                str(finish),
-                                str(date_str),
-                                price_float
-                            ))
-                            
+
+                            records_batch.append(
+                                (
+                                    str(uuid),
+                                    str(card_format),
+                                    str(vendor),
+                                    str(list_type),
+                                    str(finish),
+                                    str(date_str),
+                                    price_float,
+                                )
+                            )
+
                             if len(records_batch) >= batch_size:
                                 df = pd.DataFrame(
                                     records_batch,
-                                    columns=["uuid", "format", "vendor", "list_type", "finish", "price_date", "price"]
+                                    columns=[
+                                        "uuid",
+                                        "format",
+                                        "vendor",
+                                        "list_type",
+                                        "finish",
+                                        "price_date",
+                                        "price",
+                                    ],
                                 )
                                 yield df
                                 records_batch = []
-                                
+
     if records_batch:
         df = pd.DataFrame(
             records_batch,
-            columns=["uuid", "format", "vendor", "list_type", "finish", "price_date", "price"]
+            columns=[
+                "uuid",
+                "format",
+                "vendor",
+                "list_type",
+                "finish",
+                "price_date",
+                "price",
+            ],
         )
         yield df
+
 
 def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     posix_path = cards_csv_path.as_posix()
     if HAS_RICH:
-        console.print(f"[bold cyan]→ Ingesting dimension catalog:[/bold cyan] [dim]{posix_path}[/dim]")
+        console.print(
+            f"[bold cyan]→ Ingesting dimension catalog:[/bold cyan] [dim]{posix_path}[/dim]"
+        )
     else:
         print(f"Ingesting enriched dimension catalog from {posix_path}...")
-        
+
     conn.execute("DROP TABLE IF EXISTS dim_cards")
-    conn.execute(f"""
+    conn.execute(
+        f"""
         CREATE TABLE dim_cards AS
         SELECT
             uuid,
@@ -101,63 +127,75 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
             COALESCE(types, 'Unknown') AS card_type,
             TRY_CAST(originalReleaseDate AS DATE) AS original_release_date
         FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
-    """)
+    """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
-    
+
     count = conn.execute("SELECT COUNT(*) FROM dim_cards").fetchone()[0]
     if HAS_RICH:
-        console.print(f"  [bold green]✓ Table `dim_cards` created:[/bold green] [bold white]{count:,}[/bold white] distinct cards\n")
+        console.print(
+            f"  [bold green]✓ Table `dim_cards` created:[/bold green] [bold white]{count:,}[/bold white] distinct cards\n"
+        )
     else:
         print(f"Dimension table 'dim_cards' loaded with {count:,} cards.\n")
 
+
 def main():
     start_time = time.time()
-    
+
     raw_dir = BASE_DIR / "data" / "raw"
     db_dir = BASE_DIR / "data"
-    
+
     raw_dir.mkdir(parents=True, exist_ok=True)
     db_dir.mkdir(parents=True, exist_ok=True)
-    
+
     raw_feed_path = raw_dir / "AllPrices.json.xz"
     if not raw_feed_path.exists():
         raw_feed_path = raw_dir / "AllPrices.json"
-        
+
     cards_csv_path = raw_dir / "cards.csv"
     db_path = db_dir / "mtg_prices.duckdb"
-    
+
     if not raw_feed_path.exists():
         if HAS_RICH:
-            console.print(f"[bold red]Error:[/bold red] Raw feed file not found at [yellow]{raw_feed_path}[/yellow].")
+            console.print(
+                f"[bold red]Error:[/bold red] Raw feed file not found at [yellow]{raw_feed_path}[/yellow]."
+            )
             console.print("Run [cyan]python src/etl/download_raw.py[/cyan] first.")
         else:
             print(f"Error: Raw feed file not found at {raw_feed_path}.")
             print("Please run `python src/etl/download_raw.py` first.")
         sys.exit(1)
-        
+
     if HAS_RICH:
-        console.print(Panel(
-            f"[bold white]DuckDB Columnar Ingestion Pipeline[/bold white]\n"
-            f"[dim]Destination: {db_path}[/dim]",
-            box=box.ROUNDED,
-            border_style="cyan"
-        ))
+        console.print(
+            Panel(
+                f"[bold white]DuckDB Columnar Ingestion Pipeline[/bold white]\n"
+                f"[dim]Destination: {db_path}[/dim]",
+                box=box.ROUNDED,
+                border_style="cyan",
+            )
+        )
     else:
         print(f"Connecting to DuckDB at: {db_path}")
 
-    conn = duckdb.connect(str(db_path), config={
-        'max_memory': '2GB',
-        'threads': '4',
-        'preserve_insertion_order': 'false'
-    })
+    conn = duckdb.connect(
+        str(db_path),
+        config={
+            "max_memory": "2GB",
+            "threads": "4",
+            "preserve_insertion_order": "false",
+        },
+    )
 
     try:
-        conn.execute("""
-            CREATE TYPE price_format AS ENUM ('paper', 'mtgo');
-            CREATE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
-            CREATE TYPE price_list_type AS ENUM ('retail', 'buylist');
-            CREATE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
+        conn.execute(
+            """
+            CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
+            CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
+            CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
+            CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
             
             DROP TABLE IF EXISTS raw_fact_prices;
             CREATE TABLE raw_fact_prices (
@@ -169,19 +207,23 @@ def main():
                 price_date DATE,
                 price FLOAT
             );
-        """)
-        
+        """
+        )
+
         if HAS_RICH:
-            console.print("[bold cyan]→ Ingesting raw JSON price records into temporary staging...[/bold cyan]")
+            console.print(
+                "[bold cyan]→ Ingesting raw JSON price records into temporary staging...[/bold cyan]"
+            )
         else:
             print("Beginning DuckDB fact table staging...")
-            
+
         total_rows = 0
         batch_idx = 0
-        
+
         for df_batch in parse_and_batch_records(raw_feed_path):
             conn.register("df_batch_view", df_batch)
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO raw_fact_prices
                 SELECT
                     uuid,
@@ -192,23 +234,27 @@ def main():
                     CAST(price_date AS DATE),
                     CAST(price AS FLOAT)
                 FROM df_batch_view
-            """)
+            """
+            )
             conn.unregister("df_batch_view")
             total_rows += len(df_batch)
             batch_idx += 1
             if HAS_RICH:
-                console.print(f"  [dim]Batch {batch_idx:03d} -> Ingested {len(df_batch):,} rows | Staged Total: {total_rows:,}[/dim]")
+                console.print(
+                    f"  [dim]Batch {batch_idx:03d} -> Ingested {len(df_batch):,} rows | Staged Total: {total_rows:,}[/dim]"
+                )
             else:
                 print(f"  -> Ingested batch... Staged Total: {total_rows:,}")
 
         if HAS_RICH:
-            console.print("[bold cyan]→ Applying Robust Hampel MAD Filter for Anomaly Rejection...[/bold cyan]")
+            console.print(
+                "[bold cyan]→ Applying Robust Hampel MAD Filter for Anomaly Rejection...[/bold cyan]"
+            )
         else:
             print("Applying Robust Hampel MAD Filter for Anomaly Rejection...")
-            
-        # Implement robust MAD filter with scale floor to prevent zero-variance 
-        # denominator explosion on low-liquidity/sparse items.
-        conn.execute("""
+
+        conn.execute(
+            """
             DROP TABLE IF EXISTS fact_prices;
             CREATE TABLE fact_prices AS
             WITH RollingWindowStats AS (
@@ -262,45 +308,80 @@ def main():
                 FROM FlaggedTicks
             )
             SELECT * FROM ForwardFilled WHERE price IS NOT NULL;
-        """)
+        """
+        )
         conn.execute("DROP TABLE raw_fact_prices;")
-        
+
         final_rows = conn.execute("SELECT COUNT(*) FROM fact_prices").fetchone()[0]
 
         if HAS_RICH:
-            console.print(f"  [bold green]✓ Fact prices clean & complete:[/bold green] [bold white]{final_rows:,}[/bold white] total observations\n")
+            console.print(
+                f"  [bold green]✓ Fact prices clean & complete:[/bold green] [bold white]{final_rows:,}[/bold white] total observations\n"
+            )
             console.print("[bold cyan]→ Building analytical indexes...[/bold cyan]")
         else:
             print(f"Fact table complete! Total clean records loaded: {final_rows:,}\n")
             print("Building analytical indexes on fact_prices...")
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, finish);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
-        
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, finish);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);"
+        )
+
         if cards_csv_path.exists():
             load_dimension_cards(conn, cards_csv_path)
         else:
             if HAS_RICH:
-                console.print(f"[bold yellow]Warning:[/bold yellow] {cards_csv_path} not found. Skipping dim_cards.")
+                console.print(
+                    f"[bold yellow]Warning:[/bold yellow] {cards_csv_path} not found. Skipping dim_cards."
+                )
             else:
-                print(f"Warning: {cards_csv_path} not found. Skipping dim_cards creation.")
-                
+                print(
+                    f"Warning: {cards_csv_path} not found. Skipping dim_cards creation."
+                )
+
         elapsed = time.time() - start_time
         if HAS_RICH:
-            summary = Table(box=box.ROUNDED, border_style="green", show_header=True, header_style="bold green")
+            summary = Table(
+                box=box.ROUNDED,
+                border_style="green",
+                show_header=True,
+                header_style="bold green",
+            )
             summary.add_column("Pipeline Stage", style="bold white")
             summary.add_column("Record Count", justify="right", style="cyan")
             summary.add_column("Status / SLA", justify="right", style="bold green")
             summary.add_row("Raw Price Ticks Staged", f"{total_rows:,}", "Ingested")
-            summary.add_row("Hampel MAD Sanitized Ticks", f"{final_rows:,}", f"-{total_rows - final_rows:,} anomalies removed")
-            summary.add_row("Total Ingestion Elapsed Time", f"{elapsed:.2f}s", "Sub-100s Target Cleared")
-            summary.add_row("Columnar Physical Layout", "ENUM Dictionary Encoded", "Zonemaps & Index Built")
-            console.print(Panel(summary, title="[bold green]DuckDB Ingestion Pipeline Complete[/bold green]", box=box.ROUNDED))
-            
+            summary.add_row(
+                "Hampel MAD Sanitized Ticks",
+                f"{final_rows:,}",
+                f"-{total_rows - final_rows:,} anomalies removed",
+            )
+            summary.add_row(
+                "Total Ingestion Elapsed Time",
+                f"{elapsed:.2f}s",
+                "Sub-100s Target Cleared",
+            )
+            summary.add_row(
+                "Columnar Physical Layout",
+                "ENUM Dictionary Encoded",
+                "Zonemaps & Index Built",
+            )
+            console.print(
+                Panel(
+                    summary,
+                    title="[bold green]DuckDB Ingestion Pipeline Complete[/bold green]",
+                    box=box.ROUNDED,
+                )
+            )
+
     finally:
         conn.close()
         if not HAS_RICH:
             print("DuckDB connection closed successfully.")
+
 
 if __name__ == "__main__":
     main()
