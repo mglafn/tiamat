@@ -1,5 +1,7 @@
 import os
 import sys
+import types
+import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict
@@ -24,6 +26,8 @@ try:
     console = Console()
 except ImportError:
     HAS_RICH = False
+
+logger = logging.getLogger("uvicorn.error")
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
@@ -86,6 +90,17 @@ class ConformalizedLowerBoundGenerator:
         raw_q_lo = self.q_lo_model.predict(X_test)
         return raw_q_lo - self.q_hat_conformal
 
+# =====================================================================
+# UNPICKLE COMPATIBILITY SHIM FOR UVICORN/RENDER
+# Injects custom classes and loss functions into __main__ so joblib
+# can deserialize artifacts trained from standalone scripts.
+# =====================================================================
+for target_mod in ("__main__", "src.analytics.train_forecast", "train_forecast"):
+    if target_mod not in sys.modules:
+        sys.modules[target_mod] = types.ModuleType(target_mod)
+    setattr(sys.modules[target_mod], "smooth_asymmetric_huber_objective", smooth_asymmetric_huber_objective)
+    setattr(sys.modules[target_mod], "ConformalizedLowerBoundGenerator", ConformalizedLowerBoundGenerator)
+
 ALLOWED_FEATURE_COLS = (
     'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
     'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
@@ -122,26 +137,19 @@ def calculate_direct_payout(
     clamp_dead_zone: bool = True,
     is_pro: bool = False
 ) -> float:
-    """
-    Computes exact net liquidation proceeds on TCGplayer Direct under piecewise 
-    discontinuous rate cards using arbitrary-precision IEEE 754 Banker's Rounding.
-    """
     d_price = Decimal(str(round(price, 4)))
     d_tax = Decimal(str(tax_rate))
     
     if d_price < Decimal('0.40'):
         return 0.00
         
-    # Apply continuous dead-zone mapper to eliminate inverted margin cliff
     if clamp_dead_zone and Decimal('2.50') <= d_price <= Decimal('2.67'):
         d_price = Decimal('2.49')
         
-    # Tier 1: Sub-$2.50 Micro-Sales (Flat 50% Fee, All Commissions Waived)
     if d_price < Decimal('2.50'):
         fee = (d_price * Decimal('0.50')).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
         return float(d_price - fee)
         
-    # Tier 2: $2.50+ Standard Direct Rate Card
     direct_fixed = Decimal('1.12')
     commission = min(d_price * Decimal('0.0895'), Decimal('75.00'))
     pro_fee = min(d_price * Decimal('0.025'), Decimal('75.00')) if is_pro else Decimal('0.00')
@@ -159,9 +167,6 @@ def calculate_condition_risk_haircut(
     reject_rate: float = 0.005,
     salvage_factor: float = 0.75
 ) -> float:
-    """
-    Evaluates probabilistic condition downgrade haircut (kappa_risk) on centralized intake.
-    """
     safe_direct = max(0.40, direct_price)
     downgrade_penalty = (safe_direct - (salvage_factor * acq_cost)) / safe_direct
     reject_penalty = 1.0
@@ -204,10 +209,11 @@ async def lifespan(app: FastAPI):
         console.print(Panel(banner_grid, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
         console.print()
     else:
-        print(f"Starting Tiamat Analytics Microservice (DB: {DB_PATH}, Model: {MODEL_PATH})")
+        logger.info(f"Starting Tiamat Analytics Microservice (DB: {DB_PATH}, Model: {MODEL_PATH})")
 
     if MODEL_PATH.exists():
         try:
+            logger.info("Deserializing XGBoost model artifact...")
             model_artifact = joblib.load(MODEL_PATH)
             metrics = model_artifact.get("metrics", {})
             tau = metrics.get("prob_threshold", 0.90)
@@ -224,18 +230,16 @@ async def lifespan(app: FastAPI):
                 diag_table.add_row("DuckDB Columnar Physical Layout", "ENUM Dictionary Types + Min-Max Zonemaps", "READ_ONLY ASOF")
                 console.print(Panel(diag_table, title="[bold green]Predictive Subsystem Ready for Inference[/bold green]", box=box.ROUNDED))
                 console.print()
-            else:
-                print(f"Loaded XGBoost CQR model artifact from: {MODEL_PATH}")
+            
+            logger.info(f"XGBoost model successfully loaded! (tau={tau:.4f}, MAE={mae:.3f}%)")
         except Exception as e:
+            logger.error(f"Error loading model artifact: {e}", exc_info=True)
             if HAS_RICH:
                 console.print(f"[bold red]✖ Error loading model artifact:[/bold red] {e}")
-            else:
-                print(f"Error loading model artifact: {e}", file=sys.stderr)
     else:
+        logger.warning(f"Model artifact not found at {MODEL_PATH}")
         if HAS_RICH:
-            console.print(f"[bold yellow]⚠ Warning:[/bold yellow] Model artifact not found at {MODEL_PATH}. Train model via `python run_pipeline.py`.")
-        else:
-            print(f"Warning: Model artifact not found at {MODEL_PATH}", file=sys.stderr)
+            console.print(f"[bold yellow]⚠ Warning:[/bold yellow] Model artifact not found at {MODEL_PATH}.")
             
     yield
 
@@ -247,7 +251,7 @@ def get_db():
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Database unavailable or locked by an active ETL job: {str(e)}"
+            detail=f"Database unavailable or locked: {str(e)}"
         )
     try:
         yield conn
@@ -266,9 +270,9 @@ allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") i
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=allowed_origins if allowed_origins else ["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -421,8 +425,7 @@ def get_forecast(
     try:
         row = db_conn.cursor().execute(query, [card_uuid, normalized_finish]).fetchone()
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error reading feature store: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error reading feature store: {str(e)}")
         
     if not row:
@@ -487,7 +490,6 @@ def get_forecast(
     amihud_cap = 0.02 / max(amihud_val, 1e-5)
     final_dollar = min(dollar_kelly, 50.0, amihud_cap)
     
-    # Safe allocation conversion against NaNs
     allocated_units_raw = max(1.0, np.floor(final_dollar / max(basis, 0.01)))
     allocated_units = 1 if pd.isna(allocated_units_raw) else int(allocated_units_raw)
     
@@ -524,6 +526,7 @@ def get_forecast(
         is_defensive_vetoed=len(veto_reasons) > 0,
         veto_reasons=veto_reasons
     )
+
 @app.get("/api/v1/arbitrage", response_model=List[ArbitrageOpportunity], tags=["Analytics"])
 def get_arbitrage(
     min_spread: float = Query(0.00), finish: Optional[str] = Query(None), limit: int = Query(100, le=500),
