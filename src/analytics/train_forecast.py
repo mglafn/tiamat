@@ -1,3 +1,11 @@
+"""
+src/analytics/train_forecast.py
+--------------------------------
+Dual-Persona Multi-Quantile XGBoost Predictive Engine.
+Simultaneously estimates 10th, 50th, and 90th conditional quantiles with
+Isotonic F2.0 calibration for the Buyer Radar, configured via src.config.
+"""
+
 import os
 import sys
 import time
@@ -6,272 +14,93 @@ import duckdb
 import pandas as pd
 import numpy as np
 import joblib
-from xgboost import XGBRegressor, XGBClassifier
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.ensemble import GradientBoostingRegressor
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
-from rich.text import Text
-from rich import box
+import xgboost as xgb
+from sklearn.metrics import mean_absolute_error, precision_recall_curve
+from sklearn.isotonic import IsotonicRegression
 
+# Ensure repository root is on sys.path for direct script execution
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_DIR = BASE_DIR / "models"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-console = Console()
+from src.config import DB_PATH, MODEL_PATH, MODELS_DIR, MODEL_CONFIG, FEATURE_COLS
 
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    """
-    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
-    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
-    instability and hessian discontinuity near zero-error bounds.
-    """
-    e = y_pred - y_true
-    alpha = 0.20
-    gamma = 5.0
-    delta = 1.0
-    k = 10.0
-    
-    # Sigmoid smoothing and derivatives
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    
-    # Asymmetric Weight w_k(e) and derivatives
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    
-    # Pseudo-Huber Loss l_delta(e) and derivatives
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    
-    # Analytical Gradient g_i and Hessian h_i
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    
-    # Guarantee numerical floor on Hessian to prevent division by zero
-    hess = np.maximum(hess, 1e-6)
-    
-    return grad, hess
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+    from rich.text import Text
+    from rich import box
+    HAS_RICH = True
+    console = Console()
+except ImportError:
+    HAS_RICH = False
 
-class ConformalizedLowerBoundGenerator:
-    def __init__(self, alpha: float = 0.10):
-        self.q_lo_model = GradientBoostingRegressor(loss='quantile', alpha=alpha / 2.0, n_estimators=100, random_state=42)
-        self.q_hi_model = GradientBoostingRegressor(loss='quantile', alpha=1.0 - (alpha / 2.0), n_estimators=100, random_state=42)
-        self.alpha = alpha
-        self.q_hat_conformal = None
-
-    def fit_and_calibrate(self, X_train: pd.DataFrame, y_train: pd.Series, X_cal: pd.DataFrame, y_cal: pd.Series):
-        self.q_lo_model.fit(X_train, y_train)
-        self.q_hi_model.fit(X_train, y_train)
-        q_lo_preds = self.q_lo_model.predict(X_cal)
-        q_hi_preds = self.q_hi_model.predict(X_cal)
+def print_header(db_path: Path, model_output_path: Path):
+    if not HAS_RICH:
+        print(f"\n--- TIAMAT QUANT TERMINAL │ Multi-Quantile Training Engine ---")
+        return
         
-        scores = np.maximum(q_lo_preds - y_cal.to_numpy(), y_cal.to_numpy() - q_hi_preds)
-        n = len(y_cal)
-        q_level = np.ceil((n + 1) * (1.0 - self.alpha)) / n
-        q_level = min(1.0, max(0.0, q_level))
-        
-        self.q_hat_conformal = float(np.quantile(scores, q_level, method='higher'))
-
-    def predict_lpb(self, X_test: pd.DataFrame) -> np.ndarray:
-        if self.q_hat_conformal is None:
-            raise ValueError("CQR model must be calibrated prior to generating lower prediction bounds.")
-        raw_q_lo = self.q_lo_model.predict(X_test)
-        return raw_q_lo - self.q_hat_conformal
-
-def print_header(db_path: str, model_output_dir: str):
     header_grid = Table.grid(expand=True)
     header_grid.add_column(justify="left", ratio=3)
     header_grid.add_column(justify="right", ratio=2)
     
     title = Text()
-    title.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
+    title.append("TIAMAT QUANT TERMINAL", style="bold cyan")
     title.append(" │ ", style="dim white")
-    title.append("ML Forecasting Engine Trainer", style="bold white")
-    title.append("\nTwo-Stage Hurdle Architecture • Smooth Asymmetric Loss • CQR LPB Bounds", style="dim italic")
+    title.append("Multi-Quantile Forecasting Engine", style="bold white")
+    title.append("\nDual-Persona Topology • Multi-Output Quantiles (q10/q50/q90) • Config-Driven", style="dim italic")
     
     meta = Text()
-    meta.append(f"Database: {db_path}\n", style="dim cyan")
-    meta.append(f"Artifacts: {model_output_dir}  ", style="dim yellow")
+    meta.append(f"Database: {db_path.name}\n", style="dim cyan")
+    meta.append(f"Artifact: {model_output_path.name}  ", style="dim yellow")
     meta.append("[Ready]", style="bold green")
     
     header_grid.add_row(title, meta)
     console.print(Panel(header_grid, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
     console.print()
 
-def print_split_table(splits_data: dict, total_records: int):
-    table = Table(
-        title="[bold white]1. TEMPORAL PARTITION & EMBARGO TOPOLOGY[/bold white]",
-        box=box.ROUNDED,
-        header_style="bold cyan",
-        border_style="bright_black",
-        expand=True
-    )
-    table.add_column("Partition Segment", style="bold white", width=22)
-    table.add_column("Date Range", style="yellow", justify="center")
-    table.add_column("Observations", justify="right")
-    table.add_column("Universe Share", justify="right")
-    table.add_column("Breakouts (≥ +12%)", justify="right", style="bold green")
-    
-    for name, s in splits_data.items():
-        if s.get("is_embargo"):
-            table.add_row(
-                f"[dim italic]🛡 {name}[/dim italic]",
-                f"[dim]{s['range']}[/dim]",
-                "[dim]—[/dim]",
-                "[dim]—[/dim]",
-                "[dim italic]14D Embargo Guard[/dim italic]"
-            )
-        else:
-            share = f"{(s['count'] / total_records) * 100:.1f}%" if total_records else "0%"
-            movers = f"{s['movers']:,} ({s['movers_pct']:.1f}%)" if s['count'] > 0 else "—"
-            table.add_row(name, s['range'], f"{s['count']:,}", share, movers)
-            
-    console.print(table)
-    console.print()
-
-def print_post_training_report(metrics_dict: dict, classifier, regressor, feature_cols, X_val, y_val, X_test, y_test, cqr_gen):
-    val_probs = classifier.predict_proba(X_val)[:, 1]
-    val_mags = regressor.predict(X_val)
-    opt_val_preds = np.where(val_probs >= metrics_dict['prob_threshold'], val_mags, 0.0)
-    
-    val_base_mae = mean_absolute_error(y_val, val_mags)
-    val_opt_mae = mean_absolute_error(y_val, opt_val_preds)
-    
-    val_lpb = cqr_gen.predict_lpb(X_val)
-    val_coverage = np.mean(y_val.to_numpy() >= val_lpb) * 100.0
-    val_active_count = int(np.sum(val_probs >= metrics_dict['prob_threshold']))
-    val_active_pct = (val_active_count / len(X_val)) * 100.0 if len(X_val) > 0 else 0.0
-    
-    test_probs = classifier.predict_proba(X_test)[:, 1]
-    test_mags = regressor.predict(X_test)
-    opt_test_preds = np.where(test_probs >= metrics_dict['prob_threshold'], test_mags, 0.0)
-    
-    test_base_mae = mean_absolute_error(y_test, test_mags)
-    test_opt_mae = mean_absolute_error(y_test, opt_test_preds)
-    
-    test_lpb = cqr_gen.predict_lpb(X_test)
-    test_coverage = np.mean(y_test.to_numpy() >= test_lpb) * 100.0
-    test_active_count = int(np.sum(test_probs >= metrics_dict['prob_threshold']))
-    test_active_pct = (test_active_count / len(X_test)) * 100.0 if len(X_test) > 0 else 0.0
-    
-    test_active_mask = (test_probs >= metrics_dict['prob_threshold']) & (opt_test_preds > 0.0)
-    test_dir_acc = (
-        float(np.mean(y_test.to_numpy()[test_active_mask] > 0.0) * 100.0)
-        if np.sum(test_active_mask) > 0
-        else 0.0
-    )
-    
-    perf_table = Table(
-        title="[bold white]2. MODEL EVALUATION & CONFORMAL COVERAGE DIAGNOSTICS[/bold white]",
-        box=box.ROUNDED,
-        header_style="bold magenta",
-        border_style="bright_black",
-        expand=True
-    )
-    perf_table.add_column("Diagnostic Performance Metric", style="bold white")
-    perf_table.add_column("Validation Partition", justify="right", style="cyan")
-    perf_table.add_column("Out-of-Sample Test Set", justify="right", style="bold green")
-    perf_table.add_column("Benchmark / Theoretical Baseline", justify="right", style="dim")
-    
-    mae_delta_val = ((val_base_mae - val_opt_mae) / val_base_mae) * 100.0
-    mae_delta_test = ((test_base_mae - test_opt_mae) / test_base_mae) * 100.0
-    
-    perf_table.add_row(
-        "Hurdle-Gated Forecast MAE",
-        f"[bold]{val_opt_mae:.3f}%[/bold] ([green]-{mae_delta_val:.1f}%[/green])",
-        f"[bold]{test_opt_mae:.3f}%[/bold] ([green]-{mae_delta_test:.1f}%[/green])",
-        f"Raw Un-Gated Regressor: {test_base_mae:.3f}%"
-    )
-    perf_table.add_row(
-        "CQR Coverage Guarantee (Target: 90.0%)",
-        f"{val_coverage:.2f}%",
-        f"[bold green]{test_coverage:.2f}%[/bold green]",
-        f"Calibrated Conformal Score q̂: {cqr_gen.q_hat_conformal:.3f}"
-    )
-    perf_table.add_row(
-        "Filtered Execution Trigger Volume",
-        f"{val_active_count:,} / {len(X_val):,} ({val_active_pct:.2f}%)",
-        f"{test_active_count:,} / {len(X_test):,} ({test_active_pct:.2f}%)",
-        "Selective Right-Tail Signals Only"
-    )
-    perf_table.add_row(
-        "Active Signal Directional Win Rate",
-        "—",
-        f"[bold green]{test_dir_acc:.1f}%[/bold green]",
-        "Target Realized Return > 0.0%"
-    )
-    perf_table.add_row(
-        "Optimal Hurdle Conviction Threshold (τ)",
-        f"{metrics_dict['prob_threshold']:.4f}",
-        "—",
-        "MAE Minimum over [0.50, 0.98]"
-    )
-    perf_table.add_row(
-        "Epistemic Variance Baseline (σ²)",
-        f"{metrics_dict['epistemic_var_baseline']:.4f}",
-        "—",
-        "Ensemble Sub-Sample Dispersion"
-    )
-    
-    console.print(perf_table)
-    console.print()
-    
-    clf_imp = pd.Series(classifier.feature_importances_, index=feature_cols).sort_values(ascending=False).head(5)
-    reg_imp = pd.Series(regressor.feature_importances_, index=feature_cols).sort_values(ascending=False).head(5)
-    
-    feat_table = Table(
-        title="[bold white]3. FEATURE GAIN ATTRIBUTION (Top 5 Predictor Weights)[/bold white]",
-        box=box.ROUNDED,
-        header_style="bold yellow",
-        border_style="bright_black",
-        expand=True
-    )
-    feat_table.add_column("Rank", justify="center", width=6, style="dim")
-    feat_table.add_column("Stage 1 Spike Classifier Gate", style="cyan")
-    feat_table.add_column("Clf Gain", justify="right", style="cyan")
-    feat_table.add_column("Stage 2 Magnitude SAEHL Regressor", style="yellow")
-    feat_table.add_column("Reg Gain", justify="right", style="yellow")
-    
-    for i in range(5):
-        feat_table.add_row(
-            f"#{i+1}",
-            clf_imp.index[i],
-            f"{clf_imp.values[i]:.4f}",
-            reg_imp.index[i],
-            f"{reg_imp.values[i]:.4f}"
-        )
-    console.print(feat_table)
-    console.print()
-
-def train_xgboost_forecast(db_path: str, model_output_dir: str):
+def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path = MODEL_PATH):
     start_time = time.time()
-    print_header(db_path, model_output_dir)
+    print_header(db_path, model_output_path)
     
-    if not Path(db_path).exists():
-        console.print(f"[bold red]✖ Error:[/bold red] Database not found at '{db_path}'. Run ETL first.")
-        raise FileNotFoundError(f"Database not found at '{db_path}'. Run ETL first.")
-        
-    with console.status("[bold cyan]Querying DuckDB fact dataset...", spinner="dots"):
-        conn = duckdb.connect(db_path, read_only=True)
-        query = """
+    if not db_path.exists():
+        err_msg = f"Database not found at '{db_path}'. Run ETL first."
+        if HAS_RICH: console.print(f"[bold red]✖ Error:[/bold red] {err_msg}")
+        else: print(f"Error: {err_msg}", file=sys.stderr)
+        raise FileNotFoundError(err_msg)
+
+    feature_select_sql = ", ".join([f"f.{col}" for col in FEATURE_COLS])
+    
+    if HAS_RICH:
+        with console.status("[bold cyan]Loading training observations from DuckDB...", spinner="dots"):
+            conn = duckdb.connect(str(db_path), read_only=True)
+            query = f"""
+                SELECT
+                    t.price_date, t.current_price, t.target_return_7d_pct,
+                    {feature_select_sql}
+                FROM fact_training_dataset t
+                JOIN fact_card_features f 
+                    ON t.uuid = f.uuid AND t.finish = f.finish AND t.price_date = f.price_date
+                WHERE t.target_return_7d_pct IS NOT NULL
+                  AND t.current_price >= 1.00
+                  AND t.target_return_7d_pct BETWEEN -60.0 AND 200.0
+            """
+            df = conn.execute(query).fetchdf()
+            conn.close()
+    else:
+        conn = duckdb.connect(str(db_path), read_only=True)
+        query = f"""
             SELECT
-                price_date, sma_ratio, volatility_14d, daily_return_pct, velocity_7d_pct,
-                bid_ask_spread_pct, spread_velocity_7d, vendor_delta_7d, price_decay_velocity_3d,
-                amihud_illiquidity_30d, is_foil, is_reserved, mana_value, popularity_score,
-                is_land, is_creature, asset_age_years, rarity_score, target_return_7d_pct
-            FROM fact_training_dataset
-            WHERE target_return_7d_pct IS NOT NULL
-              AND current_price >= 2.50
-              AND target_return_7d_pct BETWEEN -50.0 AND 150.0
+                t.price_date, t.current_price, t.target_return_7d_pct,
+                {feature_select_sql}
+            FROM fact_training_dataset t
+            JOIN fact_card_features f 
+                ON t.uuid = f.uuid AND t.finish = f.finish AND t.price_date = f.price_date
+            WHERE t.target_return_7d_pct IS NOT NULL
+              AND t.current_price >= 1.00
+              AND t.target_return_7d_pct BETWEEN -60.0 AND 200.0
         """
         df = conn.execute(query).fetchdf()
         conn.close()
@@ -279,186 +108,183 @@ def train_xgboost_forecast(db_path: str, model_output_dir: str):
     df['price_date'] = pd.to_datetime(df['price_date'])
     df = df.sort_values('price_date').reset_index(drop=True)
     
-    feature_cols = [
-        'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
-        'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
-        'price_decay_velocity_3d', 'amihud_illiquidity_30d',
-        'is_foil', 'is_reserved', 'mana_value', 'popularity_score',
-        'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
-    ]
+    df[FEATURE_COLS] = df[FEATURE_COLS].fillna(0.0)
     target_col = 'target_return_7d_pct'
     
-    df[feature_cols] = df[feature_cols].fillna(0.0)
+    cfg = MODEL_CONFIG
     
+    # Temporal Split with Purged Embargo Buffer
     total_days = (df['price_date'].max() - df['price_date'].min()).days
-    EMBARGO_DAYS = 14
-    test_days = max(5, int(total_days * 0.15))
-    val_days = max(5, int(total_days * 0.15))
+    test_days = max(7, int(total_days * 0.15))
+    val_days = max(7, int(total_days * 0.15))
+    embargo_delta = pd.Timedelta(days=cfg['EMBARGO_DAYS'])
     
     test_start_date = df['price_date'].max() - pd.Timedelta(days=test_days)
-    val_end_date = test_start_date - pd.Timedelta(days=EMBARGO_DAYS)
+    val_end_date = test_start_date - embargo_delta
     val_start_date = val_end_date - pd.Timedelta(days=val_days)
+    train_cutoff_date = val_start_date - embargo_delta
     
-    train_cutoff_date = val_start_date - pd.Timedelta(days=EMBARGO_DAYS)
-    cal_cutoff_date = train_cutoff_date - pd.Timedelta(days=val_days)
-    
-    X = df[feature_cols]
+    X = df[FEATURE_COLS]
     y = df[target_col]
     
-    train_mask = df['price_date'] <= cal_cutoff_date
-    cal_mask = (df['price_date'] > cal_cutoff_date) & (df['price_date'] <= train_cutoff_date)
+    train_mask = df['price_date'] <= train_cutoff_date
     val_mask = (df['price_date'] >= val_start_date) & (df['price_date'] <= val_end_date)
     test_mask = df['price_date'] >= test_start_date
     
     X_train, y_train = X.loc[train_mask], y.loc[train_mask]
-    X_cal, y_cal = X.loc[cal_mask], y.loc[cal_mask]
     X_val, y_val = X.loc[val_mask], y.loc[val_mask]
     X_test, y_test = X.loc[test_mask], y.loc[test_mask]
-    
-    HURDLE_UPWARD_PCT = 12.0
-    y_train_class = (y_train >= HURDLE_UPWARD_PCT).astype(int)
-    y_val_class = (y_val >= HURDLE_UPWARD_PCT).astype(int)
-    
-    pos_count = int(y_train_class.sum())
-    neg_count = len(y_train_class) - pos_count
-    scale_weight = (neg_count / pos_count) if pos_count > 0 else 1.0
 
-    splits_summary = {
-        "Train Set": {
-            "range": f"{df.loc[train_mask, 'price_date'].min().strftime('%Y-%m-%d')} → {cal_cutoff_date.strftime('%Y-%m-%d')}",
-            "count": len(X_train),
-            "movers": int(y_train_class.sum()),
-            "movers_pct": (y_train_class.sum() / len(y_train_class) * 100) if len(y_train_class) else 0.0,
-            "is_embargo": False
-        },
-        "Calibration Set": {
-            "range": f"{(cal_cutoff_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')} → {train_cutoff_date.strftime('%Y-%m-%d')}",
-            "count": len(X_cal),
-            "movers": int((y_cal >= HURDLE_UPWARD_PCT).sum()),
-            "movers_pct": ((y_cal >= HURDLE_UPWARD_PCT).sum() / len(y_cal) * 100) if len(y_cal) else 0.0,
-            "is_embargo": False
-        },
-        "Embargo Gap 1": {
-            "range": f"{(train_cutoff_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')} → {(val_start_date - pd.Timedelta(days=1)).strftime('%Y-%m-%d')} ({EMBARGO_DAYS}d)",
-            "is_embargo": True
-        },
-        "Validation Set": {
-            "range": f"{val_start_date.strftime('%Y-%m-%d')} → {val_end_date.strftime('%Y-%m-%d')}",
-            "count": len(X_val),
-            "movers": int(y_val_class.sum()),
-            "movers_pct": (y_val_class.sum() / len(y_val_class) * 100) if len(y_val_class) else 0.0,
-            "is_embargo": False
-        },
-        "Embargo Gap 2": {
-            "range": f"{(val_end_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')} → {(test_start_date - pd.Timedelta(days=1)).strftime('%Y-%m-%d')} ({EMBARGO_DAYS}d)",
-            "is_embargo": True
-        },
-        "Test Set (Holdout)": {
-            "range": f"{test_start_date.strftime('%Y-%m-%d')} → {df['price_date'].max().strftime('%Y-%m-%d')}",
-            "count": len(X_test),
-            "movers": int((y_test >= HURDLE_UPWARD_PCT).sum()),
-            "movers_pct": ((y_test >= HURDLE_UPWARD_PCT).sum() / len(y_test) * 100) if len(y_test) else 0.0,
-            "is_embargo": False
-        },
-    }
-    
-    print_split_table(splits_summary, len(df))
+    if HAS_RICH:
+        console.print(f"[bold white]Partition Breakdown:[/bold white] Train: [cyan]{len(X_train):,}[/cyan] | Val: [yellow]{len(X_val):,}[/yellow] | Test: [green]{len(X_test):,}[/green] ({cfg['EMBARGO_DAYS']}D Embargo Protected)\n")
 
-    with Progress(
-        SpinnerColumn(spinner_name="dots", style="bold cyan"),
-        TextColumn("[bold cyan]{task.description}"),
-        BarColumn(bar_width=35, style="dim white", complete_style="bold cyan"),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-        console=console,
-        transient=False
-    ) as progress:
+    quantile_models = {}
+
+    if HAS_RICH:
+        with Progress(
+            SpinnerColumn(spinner_name="dots", style="bold cyan"),
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(bar_width=35, style="dim white", complete_style="bold cyan"),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False
+        ) as progress:
+            task = progress.add_task("[cyan]Training Quantile Models...", total=5)
+            
+            for q in cfg['QUANTILES']:
+                progress.update(task, description=f"[bold cyan]Training Quantile Regressor q={q:.2f}...")
+                model = xgb.XGBRegressor(
+                    objective="reg:quantileerror",
+                    quantile_alpha=q,
+                    n_estimators=250,
+                    learning_rate=0.04,
+                    max_depth=5,
+                    subsample=0.85,
+                    colsample_bytree=0.80,
+                    tree_method="hist",
+                    random_state=42,
+                    n_jobs=4
+                )
+                model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+                quantile_models[q] = model
+                progress.advance(task)
+                
+            progress.update(task, description=f"[bold cyan]Calibrating Buyer Radar (q_0.90 -> P(Spike >= {cfg['SPIKE_THRESHOLD_PCT']}%))...")
+            val_preds_q90 = quantile_models[0.90].predict(X_val)
+            y_val_binary = (y_val >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
+            
+            isotonic_calibrator = IsotonicRegression(out_of_bounds="clip")
+            isotonic_calibrator.fit(val_preds_q90, y_val_binary)
+            calibrated_probs_val = isotonic_calibrator.transform(val_preds_q90)
+            progress.advance(task)
+            
+            progress.update(task, description=f"[bold cyan]Optimizing Threshold (F-beta={cfg['F_BETA_RECALL_WEIGHT']:.1f})...")
+            precisions, recalls, thresholds = precision_recall_curve(y_val_binary, calibrated_probs_val)
+            beta_sq = cfg['F_BETA_RECALL_WEIGHT'] ** 2
+            
+            f_scores = [
+                (1 + beta_sq) * (p * r) / ((beta_sq * p) + r + 1e-8)
+                for p, r in zip(precisions, recalls)
+            ]
+            best_idx = np.argmax(f_scores)
+            optimal_tau_buyer = float(thresholds[min(best_idx, len(thresholds) - 1)]) if len(thresholds) > 0 else 0.40
+            optimal_tau_buyer = max(0.20, min(0.75, optimal_tau_buyer))
+            progress.advance(task)
+    else:
+        for q in cfg['QUANTILES']:
+            print(f"Training Quantile Regressor q={q:.2f}...")
+            model = xgb.XGBRegressor(
+                objective="reg:quantileerror",
+                quantile_alpha=q,
+                n_estimators=250,
+                learning_rate=0.04,
+                max_depth=5,
+                subsample=0.85,
+                colsample_bytree=0.80,
+                tree_method="hist",
+                random_state=42,
+                n_jobs=4
+            )
+            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            quantile_models[q] = model
+            
+        val_preds_q90 = quantile_models[0.90].predict(X_val)
+        y_val_binary = (y_val >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
         
-        task = progress.add_task("[cyan]Executing Training Steps...", total=6)
+        isotonic_calibrator = IsotonicRegression(out_of_bounds="clip")
+        isotonic_calibrator.fit(val_preds_q90, y_val_binary)
+        calibrated_probs_val = isotonic_calibrator.transform(val_preds_q90)
         
-        progress.update(task, description="[bold cyan][1/6] Training XGBClassifier (Spike Hurdle Engine)...")
-        classifier = XGBClassifier(
-            n_estimators=300, learning_rate=0.04, max_depth=6, gamma=0.5,
-            subsample=0.85, colsample_bytree=0.80, scale_pos_weight=scale_weight,
-            tree_method='hist', random_state=42, n_jobs=4, eval_metric='logloss'
+        precisions, recalls, thresholds = precision_recall_curve(y_val_binary, calibrated_probs_val)
+        beta_sq = cfg['F_BETA_RECALL_WEIGHT'] ** 2
+        f_scores = [(1 + beta_sq) * (p * r) / ((beta_sq * p) + r + 1e-8) for p, r in zip(precisions, recalls)]
+        best_idx = np.argmax(f_scores)
+        optimal_tau_buyer = float(thresholds[min(best_idx, len(thresholds) - 1)]) if len(thresholds) > 0 else 0.40
+        optimal_tau_buyer = max(0.20, min(0.75, optimal_tau_buyer))
+
+    # Out-of-sample evaluation on Holdout Test Set
+    test_q10 = quantile_models[0.10].predict(X_test)
+    test_q50 = quantile_models[0.50].predict(X_test)
+    test_q90 = quantile_models[0.90].predict(X_test)
+
+    # Monotonic Bound Enforcement: Eliminate Quantile Crossing
+    test_q10 = np.minimum(test_q10, test_q50)
+    test_q90 = np.maximum(test_q90, test_q50)
+
+    test_q50_mae = mean_absolute_error(y_test, test_q50)
+    test_calibrated_probs = isotonic_calibrator.transform(test_q90)
+    
+    flipper_signals = test_q10 >= cfg['FLIPPER_FEE_HURDLE_PCT']
+    buyer_radar_signals = test_calibrated_probs >= optimal_tau_buyer
+    
+    y_test_spikes = (y_test >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
+    buyer_recall = float(y_test_spikes[buyer_radar_signals].sum() / max(1, y_test_spikes.sum())) * 100.0
+
+    if HAS_RICH:
+        perf_table = Table(
+            title="[bold white]DUAL-PERSONA MODEL EVALUATION DIAGNOSTICS[/bold white]",
+            box=box.ROUNDED, header_style="bold magenta", border_style="bright_black", expand=True
         )
-        classifier.fit(X_train, y_train_class)
-        progress.advance(task)
-        
-        progress.update(task, description="[bold cyan][2/6] Training SAEHL XGBRegressor on Movers...")
-        movers_mask = y_train_class == 1
-        X_train_movers, y_train_movers = X_train.loc[movers_mask], y_train.loc[movers_mask]
-        
-        regressor = XGBRegressor(
-            n_estimators=300, learning_rate=0.03, max_depth=5, gamma=0.5,
-            subsample=0.85, colsample_bytree=0.80, tree_method='hist',
-            random_state=42, n_jobs=4, objective=smooth_asymmetric_huber_objective
-        )
-        regressor.fit(X_train_movers if len(X_train_movers) > 0 else X_train,
-                      y_train_movers if len(X_train_movers) > 0 else y_train)
-        progress.advance(task)
-        
-        progress.update(task, description="[bold cyan][3/6] Fitting & Calibrating Conformal Lower Bounds (CQR)...")
-        cqr_generator = ConformalizedLowerBoundGenerator(alpha=0.10)
-        cqr_generator.fit_and_calibrate(X_train, y_train, X_cal, y_cal)
-        progress.advance(task)
-        
-        progress.update(task, description="[bold cyan][4/6] Optimizing Hurdle Decision Thresholds (MAE Sweep)...")
-        raw_val_probs = classifier.predict_proba(X_val)[:, 1]
-        raw_val_mags = regressor.predict(X_val)
-        y_val_arr = y_val.to_numpy()
-        best_mae, best_prob_thresh = float('inf'), 0.95
-        
-        for candidate in np.linspace(0.50, 0.98, 49):
-            filtered_preds = np.where(raw_val_probs >= candidate, raw_val_mags, 0.0)
-            candidate_mae = mean_absolute_error(y_val_arr, filtered_preds)
-            if candidate_mae < best_mae:
-                best_mae = candidate_mae
-                best_prob_thresh = float(candidate)
-        progress.advance(task)
-        
-        progress.update(task, description="[bold cyan][5/6] Profiling Ensemble Trajectory & Epistemic Variance...")
-        tree_preds = []
-        for i in range(regressor.n_estimators):
-            tree_preds.append(regressor.predict(X_val, iteration_range=(0, i + 1)))
-        epistemic_variance_val = float(np.var(tree_preds, axis=0).mean())
-        progress.advance(task)
-        
-        progress.update(task, description="[bold cyan][6/6] Serializing Model Bundles & Exporting Metadata...")
-        os.makedirs(model_output_dir, exist_ok=True)
-        model_path = os.path.join(model_output_dir, "xgboost_forecast.joblib")
-        
-        metrics_payload = {
-            "prob_threshold": float(best_prob_thresh),
-            "epistemic_var_baseline": float(epistemic_variance_val),
-            "split_date": str(test_start_date.date()),
-            "hurdle_upward_pct": float(HURDLE_UPWARD_PCT)
+        perf_table.add_column("Diagnostic Dimension", style="bold white")
+        perf_table.add_column("Holdout Test Metric", justify="right", style="bold green")
+        perf_table.add_column("Operational Persona Impact", justify="left", style="cyan")
+
+        perf_table.add_row("Median Forecast MAE (q_0.50)", f"{test_q50_mae:.2f}%", "Symmetric, unskewed baseline for both personas")
+        perf_table.add_row(f"Buyer Radar Spike Recall (F{cfg['F_BETA_RECALL_WEIGHT']})", f"{buyer_recall:.1f}%", f"Catches breakouts early (Threshold: τ={optimal_tau_buyer:.3f})")
+        perf_table.add_row(f"Flipper High-Conviction Triggers (q_0.10 >= {cfg['FLIPPER_FEE_HURDLE_PCT']}%)", f"{int(flipper_signals.sum()):,} trades", "Conservative capital shield clearing platform fees")
+        perf_table.add_row("Buyer Radar Triggers", f"{int(buyer_radar_signals.sum()):,} alerts", "Actionable heads-up on right-tail momentum")
+
+        console.print()
+        console.print(perf_table)
+        console.print()
+
+    # Save artifact bundle with backward compatibility keys
+    model_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    joblib.dump({
+        "quantile_models": quantile_models,
+        "isotonic_calibrator": isotonic_calibrator,
+        "optimal_tau_buyer": optimal_tau_buyer,
+        "regressor": quantile_models[0.50],
+        "feature_cols": FEATURE_COLS,
+        "metrics": {
+            "mae_pct": float(test_q50_mae),
+            "prob_threshold": float(optimal_tau_buyer),
+            "tau_flipper_hurdle": cfg['FLIPPER_FEE_HURDLE_PCT'],
+            "tau_buyer_radar": float(optimal_tau_buyer),
+            "split_date": str(test_start_date.date())
         }
-        
-        joblib.dump({
-            "classifier": classifier,
-            "regressor": regressor,
-            "cqr_generator": cqr_generator,
-            "feature_cols": feature_cols,
-            "metrics": metrics_payload
-        }, model_path)
-        progress.advance(task)
-        
-    console.print()
-    print_post_training_report(
-        metrics_payload, classifier, regressor, feature_cols,
-        X_val, y_val, X_test, y_test, cqr_generator
-    )
-    
-    file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
-    duration = time.time() - start_time
-    
-    summary_text = Text()
-    summary_text.append("✔ Training pipeline completed successfully!\n", style="bold green")
-    summary_text.append(f"• Model Path: {model_path} ({file_size_mb:.2f} MB)\n", style="white")
-    summary_text.append(f"• Total Elapsed Time: {duration:.2f}s  |  Status: Ready for Production Inference", style="dim")
-    
-    console.print(Panel(summary_text, border_style="green", box=box.ROUNDED))
+    }, model_output_path)
+
+    elapsed = time.time() - start_time
+    if HAS_RICH:
+        console.print(Panel(
+            f"[bold green]✔ Dual-Persona Engine Serialized:[/bold green] {model_output_path} in {elapsed:.1f}s",
+            box=box.ROUNDED, border_style="green"
+        ))
+    else:
+        print(f"Model saved to {model_output_path} in {elapsed:.1f}s.")
 
 if __name__ == "__main__":
-    train_xgboost_forecast(str(DB_PATH), str(MODEL_DIR))
+    train_dual_persona_engine(DB_PATH, MODEL_PATH)

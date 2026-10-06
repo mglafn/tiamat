@@ -316,8 +316,10 @@ def scan_live_market(
         return
         
     artifact = joblib.load(model_path)
-    classifier = artifact["classifier"]
-    regressor = artifact["regressor"]
+    q_models = artifact.get("quantile_models", {})
+    calibrator = artifact.get("isotonic_calibrator")
+    classifier = artifact.get("classifier")
+    regressor = artifact.get("regressor")
     cqr_generator = artifact.get("cqr_generator")
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})

@@ -105,6 +105,7 @@ ALLOWED_FEATURE_COLS = (
     'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
     'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
     'price_decay_velocity_3d', 'amihud_illiquidity_30d',
+    'z_downside_3d', 'velocity_3d', 'accel_3d', 'exhaustion_ratio',
     'is_foil', 'is_reserved', 'mana_value', 'popularity_score',
     'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
 )
@@ -119,6 +120,10 @@ FEATURE_SCHEMA = {
     'vendor_delta_7d': (float, 0.0),
     'price_decay_velocity_3d': (float, 0.0),
     'amihud_illiquidity_30d': (float, 0.0),
+    'z_downside_3d': (float, 0.0),
+    'velocity_3d': (float, 0.0),
+    'accel_3d': (float, 0.0),
+    'exhaustion_ratio': (float, 0.0),
     'is_foil': (int, 0),
     'is_reserved': (int, 0),
     'mana_value': (float, 0.0),
@@ -439,20 +444,25 @@ def get_forecast(
     directional_acc = metrics.get("directional_accuracy_pct", 67.3)
     prob_threshold = metrics.get("prob_threshold", 0.90)
     
+    q_models = model_artifact.get("quantile_models", {})
+    calibrator = model_artifact.get("isotonic_calibrator")
     classifier = model_artifact.get("classifier")
     regressor = model_artifact.get("regressor")
     cqr_generator = model_artifact.get("cqr_generator")
-    
-    move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
-    if pd.isna(move_prob): move_prob = 0.0
 
-    predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
-    if pd.isna(predicted_gain_pct): predicted_gain_pct = 0.0
-    
-    if cqr_generator:
-        cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0])
+    # Milestone 11 Multi-Quantile Engine (with fallback to legacy models)
+    if q_models and calibrator and 0.90 in q_models:
+        pred_q90 = q_models[0.90].predict(input_df)
+        move_prob = float(calibrator.transform(pred_q90)[0])
+        predicted_gain_pct = float(q_models[0.50].predict(input_df)[0])
+        cqr_lpb = float(q_models[0.10].predict(input_df)[0])
     else:
-        cqr_lpb = predicted_gain_pct - 10.0
+        move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
+        predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
+        cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0]) if cqr_generator else (predicted_gain_pct - 10.0)
+
+    if pd.isna(move_prob): move_prob = 0.0
+    if pd.isna(predicted_gain_pct): predicted_gain_pct = 0.0
     if pd.isna(cqr_lpb): cqr_lpb = 0.0
         
     predicted_7d_price = max(0.01, round(current_price * (1.0 + (predicted_gain_pct / 100.0)), 2))

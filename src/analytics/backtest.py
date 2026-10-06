@@ -347,8 +347,10 @@ def run_arbitrage_backtest(
         return
         
     artifact = joblib.load(model_path)
-    classifier = artifact["classifier"]
-    regressor = artifact["regressor"]
+    q_models = artifact.get("quantile_models", {})
+    calibrator = artifact.get("isotonic_calibrator")
+    classifier = artifact.get("classifier")
+    regressor = artifact.get("regressor")
     cqr_generator = artifact.get("cqr_generator")
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})
@@ -386,13 +388,15 @@ def run_arbitrage_backtest(
         return {"status": "empty", "message": f"No records >= {test_start_date.date()}"} if as_dict else None
         
     X_test = test_df[feature_cols].fillna(0.0)
-    test_df['move_prob'] = classifier.predict_proba(X_test)[:, 1]
-    test_df['pred_magnitude'] = regressor.predict(X_test)
-    
-    if cqr_generator:
-        test_df['cqr_lpb'] = cqr_generator.predict_lpb(X_test)
+    if q_models and calibrator and 0.90 in q_models:
+        preds_q90 = q_models[0.90].predict(X_test)
+        test_df['move_prob'] = calibrator.transform(preds_q90)
+        test_df['pred_magnitude'] = q_models[0.50].predict(X_test)
+        test_df['cqr_lpb'] = q_models[0.10].predict(X_test)
     else:
-        test_df['cqr_lpb'] = test_df['pred_magnitude'] - 10.0
+        test_df['move_prob'] = classifier.predict_proba(X_test)[:, 1] if classifier else 0.0
+        test_df['pred_magnitude'] = regressor.predict(X_test) if regressor else 0.0
+        test_df['cqr_lpb'] = cqr_generator.predict_lpb(X_test) if cqr_generator else test_df['pred_magnitude'] - 10.0
         
     inbound_postage = np.where(test_df['current_price'] < 5.00, 0.99, 0.15)
     hub_freight = 0.012
