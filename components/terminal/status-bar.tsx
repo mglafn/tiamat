@@ -15,9 +15,9 @@ export function StatusBar({
 }: StatusBarProps) {
   const [clock, setClock] = useState('--:--:--')
   const { data: health } = useHealth()
-  const dbConnected = health?.db_connected ?? true
-  const modelReady = health?.model_loaded ?? true
-  const isHealthy = health?.status === 'healthy' || !health
+  const dbConnected = health?.db_connected ?? false
+  const modelReady = health?.model_loaded ?? false
+  const isHealthy = health?.status === 'healthy'
 
   useEffect(() => {
     const tick = () => {

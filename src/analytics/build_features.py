@@ -233,10 +233,15 @@ def build_analytical_features(db_path: str):
                 QUALIFY ROW_NUMBER() OVER(PARTITION BY c.uuid, c.finish ORDER BY c.price_date DESC) = 1
             ),
             asof_aligned AS (
+<<<<<<< Updated upstream
                 SELECT
                     c.uuid, c.finish, c.ck_date AS price_date, t.price_date AS tcg_date,
                     t.tcg_price, c.ck_price,
                     (t.tcg_price * 1.075 + CASE WHEN t.tcg_price < 5.00 THEN 0.99 ELSE 0.15 END + 0.09) AS total_acquisition_basis,
+=======
+                SELECT c.uuid, c.finish, c.ck_date AS price_date, t.tcg_price, c.ck_price,
+                    (t.tcg_price * 1.075 + CASE WHEN t.tcg_price < 5.00 THEN 0.99 ELSE 0.15 END + 0.012 + 0.09) AS total_acquisition_basis,
+>>>>>>> Stashed changes
                     (c.ck_price * 1.30) AS ck_store_credit_payout
                 FROM latest_ck_offers c
                 ASOF JOIN tcg_prices t

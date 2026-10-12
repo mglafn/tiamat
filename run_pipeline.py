@@ -144,7 +144,8 @@ def check_step_d() -> bool:
         return False
     try:
         artifact = joblib.load(MODEL_PATH)
-        if ("classifier" not in artifact and "model" not in artifact) or "metrics" not in artifact:
+        has_model = any(k in artifact for k in ("quantile_models", "classifier", "model", "regressor"))
+        if not has_model or "metrics" not in artifact:
             log_status("Model artifact schema", False, "Invalid artifact structure")
             return False
         metrics = artifact["metrics"]

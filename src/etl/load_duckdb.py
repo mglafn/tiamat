@@ -12,7 +12,6 @@ try:
     from rich.table import Table
     from rich.text import Text
     from rich import box
-
     HAS_RICH = True
     console = Console()
 except ImportError:
@@ -56,7 +55,6 @@ def parse_and_batch_records(
                                 continue
                             if price_float <= 0.0:
                                 continue
-
                             records_batch.append(
                                 (
                                     str(uuid),
@@ -68,7 +66,6 @@ def parse_and_batch_records(
                                     price_float,
                                 )
                             )
-
                             if len(records_batch) >= batch_size:
                                 df = pd.DataFrame(
                                     records_batch,
@@ -84,7 +81,6 @@ def parse_and_batch_records(
                                 )
                                 yield df
                                 records_batch = []
-
     if records_batch:
         df = pd.DataFrame(
             records_batch,
@@ -109,7 +105,6 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
         )
     else:
         print(f"Ingesting enriched dimension catalog from {posix_path}...")
-
     conn.execute("DROP TABLE IF EXISTS dim_cards")
     conn.execute(
         f"""
@@ -131,7 +126,6 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
-
     count = conn.execute("SELECT COUNT(*) FROM dim_cards").fetchone()[0]
     if HAS_RICH:
         console.print(
@@ -143,17 +137,13 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
 
 def main():
     start_time = time.time()
-
     raw_dir = BASE_DIR / "data" / "raw"
     db_dir = BASE_DIR / "data"
-
     raw_dir.mkdir(parents=True, exist_ok=True)
     db_dir.mkdir(parents=True, exist_ok=True)
-
     raw_feed_path = raw_dir / "AllPrices.json.xz"
     if not raw_feed_path.exists():
         raw_feed_path = raw_dir / "AllPrices.json"
-
     cards_csv_path = raw_dir / "cards.csv"
     db_path = db_dir / "mtg_prices.duckdb"
 
@@ -196,7 +186,6 @@ def main():
             CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
             CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
             CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
-            
             DROP TABLE IF EXISTS raw_fact_prices;
             CREATE TABLE raw_fact_prices (
                 uuid VARCHAR,
@@ -205,7 +194,7 @@ def main():
                 list_type price_list_type,
                 finish price_finish,
                 price_date DATE,
-                price FLOAT
+                price DECIMAL(12, 2)
             );
         """
         )
@@ -219,7 +208,6 @@ def main():
 
         total_rows = 0
         batch_idx = 0
-
         for df_batch in parse_and_batch_records(raw_feed_path):
             conn.register("df_batch_view", df_batch)
             conn.execute(
@@ -232,7 +220,7 @@ def main():
                     list_type::price_list_type,
                     finish::price_finish,
                     CAST(price_date AS DATE),
-                    CAST(price AS FLOAT)
+                    CAST(price AS DECIMAL(12, 2))
                 FROM df_batch_view
             """
             )
@@ -310,8 +298,8 @@ def main():
             SELECT * FROM ForwardFilled WHERE price IS NOT NULL;
         """
         )
-        conn.execute("DROP TABLE raw_fact_prices;")
 
+        conn.execute("DROP TABLE raw_fact_prices;")
         final_rows = conn.execute("SELECT COUNT(*) FROM fact_prices").fetchone()[0]
 
         if HAS_RICH:
@@ -376,7 +364,6 @@ def main():
                     box=box.ROUNDED,
                 )
             )
-
     finally:
         conn.close()
         if not HAS_RICH:

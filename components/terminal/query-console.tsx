@@ -39,7 +39,7 @@ export function QueryConsole() {
           <Cpu className="h-3 w-3 text-dim" />
           <span className="text-dim">XGBoost:</span>
           <span className={`tnum font-semibold ${modelReady ? "text-up" : "text-warn"}`}>
-            {modelReady ? "ONLINE (τ=0.89)" : "UNLOADED"}
+            {modelReady ? "ONLINE (MULTI-Q)" : "UNLOADED"}
           </span>
         </div>
       </div>

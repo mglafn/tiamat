@@ -1,10 +1,9 @@
-// components/terminal/arbitrage-book.tsx
 'use client'
-
 import { useEffect, useMemo, useRef } from 'react'
 import { ArrowUp, Download, Layers, Sparkles, Star } from 'lucide-react'
 import { useArbitrage, useCatalog } from '@/lib/hooks'
 import { usd, pct, shortUuid } from '@/lib/format'
+import { STORE_CREDIT_MULTIPLIER } from '@/lib/economics'
 
 const SPREAD_OPTIONS = [0, 2.5, 5, 10, 20]
 const FINISH_OPTIONS = ['all', 'normal', 'foil', 'etched'] as const
@@ -51,14 +50,12 @@ export function ArbitrageBook({
 
   const stagedCount = stagedUuids.size
   const stagedRows = useMemo(() => rows.filter((r) => stagedUuids.has(r.uuid)), [rows, stagedUuids])
-
   const stagedBasis = useMemo(
     () => stagedRows.reduce((acc, r) => acc + (r.tcg_price || 0), 0),
     [stagedRows]
   )
-
   const stagedExpectedPayout = useMemo(
-    () => stagedRows.reduce((acc, r) => acc + (r.ck_price || 0) * 1.3, 0),
+    () => stagedRows.reduce((acc, r) => acc + (r.ck_price || 0) * STORE_CREDIT_MULTIPLIER, 0),
     [stagedRows]
   )
 
@@ -79,7 +76,6 @@ export function ArbitrageBook({
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
       if (rows.length === 0) return
-
       const key = e.key.toLowerCase()
       if (key === 'j' || key === 'k') {
         e.preventDefault()
@@ -87,7 +83,6 @@ export function ArbitrageBook({
         const next = key === 'j' ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0)
         onSelect(rows[next].uuid, rows[next].finish)
       }
-
       if (e.code === 'Space') {
         e.preventDefault()
         const currentUuid = rows[selectedIndex]?.uuid
@@ -107,22 +102,32 @@ export function ArbitrageBook({
     el?.scrollIntoView({ block: 'nearest' })
   }, [selectedUuid, selectedFinish])
 
+  const escapeCsvField = (val: string | number | null | undefined): string => {
+    if (val == null) return '""'
+    let str = String(val)
+    // Neutralize CSV formula injection in spreadsheet viewers (=, +, -, @, \t, \r)
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = `'${str}`
+    }
+    // Escape internal quotes as required by RFC 4180
+    return `"${str.replace(/"/g, '""')}"`
+  }
+
   const handleExportCSV = () => {
     if (stagedUuids.size === 0) return
     const headers = ['UUID', 'Name', 'Set', 'Finish', 'TCG_Price', 'CK_Buylist', 'Spread_USD', 'Spread_Pct']
     const csvLines = stagedRows.map((r) =>
       [
-        r.uuid,
-        `"${r.name || 'Unknown'}"`,
-        r.set_code || 'OTC',
-        r.finish,
-        r.tcg_price,
-        r.ck_price,
-        r.price_spread,
-        r.spread_pct,
+        escapeCsvField(r.uuid),
+        escapeCsvField(r.name || 'Unknown Asset'),
+        escapeCsvField(r.set_code || 'OTC'),
+        escapeCsvField(r.finish),
+        (r.tcg_price ?? 0).toFixed(2),
+        (r.ck_price ?? 0).toFixed(2),
+        (r.price_spread ?? 0).toFixed(2),
+        (r.spread_pct ?? 0).toFixed(2),
       ].join(',')
     )
-
     const blob = new Blob([[headers.join(','), ...csvLines].join('\n')], {
       type: 'text/csv;charset=utf-8;',
     })
@@ -212,7 +217,6 @@ export function ArbitrageBook({
           const isStaged = stagedUuids.has(r.uuid)
           const hot = r.spread_pct >= 25.0
           const spreadBarPct = Math.min(100, Math.max(2, (r.spread_pct / maxSpreadPct) * 100))
-
           return (
             <button
               key={`${r.uuid}-${r.finish}-${i}`}

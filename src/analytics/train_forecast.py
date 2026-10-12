@@ -121,6 +121,7 @@ def print_split_table(splits_data: dict, total_records: int):
     table.add_column("Universe Share", justify="right")
     table.add_column("Breakouts (≥ +12%)", justify="right", style="bold green")
     
+<<<<<<< Updated upstream
     for name, s in splits_data.items():
         if s.get("is_embargo"):
             table.add_row(
@@ -137,6 +138,15 @@ def print_split_table(splits_data: dict, total_records: int):
             
     console.print(table)
     console.print()
+=======
+    if not db_path.exists():
+        err_msg = f"Database not found at '{db_path}'. Run ETL first."
+        if HAS_RICH:
+            console.print(f"[bold red]✖ Error:[/bold red] {err_msg}")
+        else:
+            print(f"Error: {err_msg}", file=sys.stderr)
+        raise FileNotFoundError(err_msg)
+>>>>>>> Stashed changes
 
 def print_post_training_report(metrics_dict: dict, classifier, regressor, feature_cols, X_val, y_val, X_test, y_test, cqr_gen):
     val_probs = classifier.predict_proba(X_val)[:, 1]

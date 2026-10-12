@@ -29,39 +29,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    """
-    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
-    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
-    instability and hessian discontinuity near zero-error bounds.
-    """
-    e = y_pred - y_true
-    alpha = 0.20
-    gamma = 5.0
-    delta = 1.0
-    k = 10.0
-    
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    hess = np.maximum(hess, 1e-6)
-    
-    return grad, hess
+from src.config import DB_PATH, MODEL_PATH, FEATURE_COLS
 
+<<<<<<< Updated upstream
 class ConformalizedLowerBoundGenerator:
     def __init__(self, alpha: float = 0.10):
         self.q_lo_model = GradientBoostingRegressor(loss='quantile', alpha=alpha / 2.0, n_estimators=100, random_state=42)
@@ -93,6 +63,9 @@ ALLOWED_FEATURE_COLS = (
     'is_foil', 'is_reserved', 'mana_value', 'popularity_score',
     'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
 )
+=======
+ALLOWED_FEATURE_COLS = tuple(FEATURE_COLS)
+>>>>>>> Stashed changes
 
 FEATURE_SCHEMA = {
     'sma_ratio': (float, 1.0),
@@ -114,6 +87,14 @@ FEATURE_SCHEMA = {
     'rarity_score': (int, 1)
 }
 
+from src.core.economics import (
+    calculate_direct_payout_scalar as calculate_direct_payout,
+    calculate_condition_risk_haircut_scalar as calculate_condition_risk_haircut,
+    compute_uncertainty_kelly_scalar,
+    compute_landed_basis_scalar,
+    OUTBOUND_BATCH_FREIGHT,
+)
+
 model_artifact = None
 
 def calculate_direct_payout(
@@ -128,9 +109,9 @@ def calculate_direct_payout(
     """
     d_price = Decimal(str(round(price, 4)))
     d_tax = Decimal(str(tax_rate))
-    
     if d_price < Decimal('0.40'):
         return 0.00
+<<<<<<< Updated upstream
         
     # Apply continuous dead-zone mapper to eliminate inverted margin cliff
     if clamp_dead_zone and Decimal('2.50') <= d_price <= Decimal('2.67'):
@@ -142,13 +123,19 @@ def calculate_direct_payout(
         return float(d_price - fee)
         
     # Tier 2: $2.50+ Standard Direct Rate Card
+=======
+    if clamp_dead_zone and Decimal('2.50') <= d_price <= Decimal('2.67'):
+        d_price = Decimal('2.49')
+    if d_price < Decimal('2.50'):
+        fee = (d_price * Decimal('0.50')).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
+        return float(d_price - fee)
+>>>>>>> Stashed changes
     direct_fixed = Decimal('1.12')
-    commission = min(d_price * Decimal('0.0895'), Decimal('75.00'))
-    pro_fee = min(d_price * Decimal('0.025'), Decimal('75.00')) if is_pro else Decimal('0.00')
+    commission_rate = Decimal('0.0895') if is_pro else Decimal('0.1075')
+    commission = min(d_price * commission_rate, Decimal('75.00'))
     gross_total = d_price * (Decimal('1.00') + d_tax)
     processing_fee = gross_total * Decimal('0.025')
-    
-    total_fee = (direct_fixed + commission + pro_fee + processing_fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
+    total_fee = (direct_fixed + commission + processing_fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
     payout = max(Decimal('0.00'), d_price - total_fee)
     return float(payout.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN))
 
@@ -261,8 +248,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if allowed_origins_env is not None and allowed_origins_env.strip():
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = default_origins
 
 app.add_middleware(
     CORSMiddleware,
@@ -386,6 +377,8 @@ def get_backtest_simulation(
     top_daily: int = Query(0, ge=0, le=20),
     is_pro: bool = Query(False)
 ):
+    if not model_artifact:
+        raise HTTPException(status_code=503, detail="Forecasting model artifact is not loaded.")
     from src.analytics.backtest import run_arbitrage_backtest
     try:
         results = run_arbitrage_backtest(
@@ -395,12 +388,12 @@ def get_backtest_simulation(
             sizing=sizing,
             top_daily=top_daily,
             is_pro=is_pro,
+            model_artifact=model_artifact,
             as_dict=True
         )
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest simulation failed: {str(e)}")
-
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
     card_uuid: str, finish: str = Query("normal"),
@@ -437,6 +430,7 @@ def get_forecast(
     classifier = model_artifact.get("classifier")
     regressor = model_artifact.get("regressor")
     cqr_generator = model_artifact.get("cqr_generator")
+<<<<<<< Updated upstream
     
     move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
     predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
@@ -446,26 +440,54 @@ def get_forecast(
     else:
         cqr_lpb = predicted_gain_pct - 10.0
         
+=======
+
+    # Milestone 11 Multi-Quantile Engine (with fallback to legacy models)
+    if q_models and calibrator and 0.90 in q_models:
+        pred_q90 = q_models[0.90].predict(input_df)
+        move_prob = float(calibrator.transform(pred_q90)[0])
+        predicted_gain_pct = float(q_models[0.50].predict(input_df)[0])
+        cqr_lpb = float(q_models[0.10].predict(input_df)[0])
+    elif classifier and regressor:
+        move_prob = float(classifier.predict_proba(input_df)[0][1])
+        predicted_gain_pct = float(regressor.predict(input_df)[0]) if (move_prob >= prob_threshold) else 0.0
+        cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0]) if cqr_generator else (predicted_gain_pct - 10.0)
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="Predictive engine sub-models are incomplete or corrupted in the loaded artifact."
+        )
+
+    if pd.isna(move_prob):
+        move_prob = 0.0
+    if pd.isna(predicted_gain_pct):
+        predicted_gain_pct = 0.0
+    if pd.isna(cqr_lpb):
+        cqr_lpb = 0.0
+
+>>>>>>> Stashed changes
     predicted_7d_price = max(0.01, round(current_price * (1.0 + (predicted_gain_pct / 100.0)), 2))
     model_mae_dollars = round(current_price * (mae_pct / 100.0), 4)
-    
-    inbound_postage = 0.99 if current_price < 5.00 else 0.15
-    hub_freight = 0.012
-    basis = (current_price * 1.075) + inbound_postage + hub_freight
-    
+
+# Inbound postage + Louisville hub courier freight
+    basis = compute_landed_basis_scalar(current_price, tax_rate=0.075)
+
     raw_expected_payout = calculate_direct_payout(predicted_7d_price, 0.075, clamp_dead_zone=True, is_pro=False)
+    payout_win_after_freight = max(0.0, raw_expected_payout - OUTBOUND_BATCH_FREIGHT)
     kappa_win = calculate_condition_risk_haircut(predicted_7d_price, basis)
-    payout_win = raw_expected_payout * kappa_win
+    payout_win = payout_win_after_freight * kappa_win
     profit_win = payout_win - basis
-    
+
     assumed_fail_price = current_price * 0.90
     raw_fail_payout = calculate_direct_payout(assumed_fail_price, 0.075, clamp_dead_zone=True, is_pro=False)
+    payout_fail_after_freight = max(0.0, raw_fail_payout - OUTBOUND_BATCH_FREIGHT)
     kappa_fail = calculate_condition_risk_haircut(assumed_fail_price, basis)
-    payout_fail = raw_fail_payout * kappa_fail
+    payout_fail = payout_fail_after_freight * kappa_fail
     profit_fail = payout_fail - basis
-    
+
     exp_net_profit = (move_prob * profit_win) + ((1.0 - move_prob) * profit_fail)
     net_expected_roi_pct = (exp_net_profit / basis) * 100.0 if basis > 0 else 0.0
+<<<<<<< Updated upstream
     
     decay_3d = float(input_df['price_decay_velocity_3d'].iloc[0]) if 'price_decay_velocity_3d' in input_df else 0.0
     amihud_val = float(input_df['amihud_illiquidity_30d'].iloc[0]) if 'amihud_illiquidity_30d' in input_df else 0.0
@@ -478,6 +500,26 @@ def get_forecast(
     amihud_cap = 0.02 / max(amihud_val, 1e-5)
     final_dollar = min(dollar_kelly, 50.0, amihud_cap)
     allocated_units = int(max(1.0, np.floor(final_dollar / max(basis, 0.01))))
+=======
+
+    decay_3d = float(input_df.get('price_decay_velocity_3d', pd.Series([0.0])).iloc[0])
+    if pd.isna(decay_3d):
+        decay_3d = 0.0
+
+    amihud_val = float(input_df.get('amihud_illiquidity_30d', pd.Series([0.0])).iloc[0])
+    if pd.isna(amihud_val):
+        amihud_val = 0.0
+
+    allocated_units = compute_uncertainty_kelly_scalar(
+        expected_roi_pct=predicted_gain_pct,
+        cqr_lpb=cqr_lpb,
+        basis=basis,
+        amihud=amihud_val,
+        portfolio_value=10000.0,
+        max_position_dollars=50.0,
+        kappa_kelly=0.25,
+    )
+>>>>>>> Stashed changes
     
     veto_reasons = []
     if move_prob < prob_threshold:

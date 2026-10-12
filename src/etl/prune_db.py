@@ -8,7 +8,6 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich import box
-
     HAS_RICH = True
     console = Console()
 except ImportError:
@@ -17,6 +16,7 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 FULL_DB = BASE_DIR / "data" / "mtg_prices_full.duckdb"
 PROD_DB = BASE_DIR / "data" / "mtg_prices.duckdb"
+<<<<<<< Updated upstream
 
 
 def create_production_snapshot():
@@ -26,12 +26,30 @@ def create_production_snapshot():
             console.print(
                 f"[bold red]Error:[/bold red] Source database not found at [yellow]{src_db}[/yellow]"
             )
+=======
+TEMP_PRUNED_DB = BASE_DIR / "data" / "mtg_prices_pruned_staging.duckdb"
+
+
+def create_production_snapshot():
+    legacy_full_db = BASE_DIR / "data" / "mtg_prices_full.duckdb"
+    if legacy_full_db.exists():
+        if HAS_RICH:
+            console.print(f"[bold yellow]Warning:[/bold yellow] Found stale {legacy_full_db.name}. Ignoring it to prevent schema regression.")
+
+    if not PROD_DB.exists():
+        if HAS_RICH:
+            console.print(f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]")
+>>>>>>> Stashed changes
         else:
             print(f"Source database not found at {src_db}", file=sys.stderr)
         sys.exit(1)
 
+<<<<<<< Updated upstream
     initial_size_mb = src_db.stat().st_size / (1024 * 1024)
 
+=======
+    initial_size_mb = PROD_DB.stat().st_size / (1024 * 1024)
+>>>>>>> Stashed changes
     if HAS_RICH:
         console.print(
             Panel(
@@ -42,12 +60,22 @@ def create_production_snapshot():
             )
         )
 
+<<<<<<< Updated upstream
     temp_prod = BASE_DIR / "data" / "mtg_prices_pruned.duckdb"
     if temp_prod.exists():
         os.remove(temp_prod)
 
     conn = duckdb.connect(
         str(temp_prod),
+=======
+    # 1. Clean up any stale staging file from an earlier interrupted run
+    if TEMP_PRUNED_DB.exists():
+        os.remove(TEMP_PRUNED_DB)
+
+    # 2. Build the pruned snapshot into the temporary staging file first
+    conn = duckdb.connect(
+        str(TEMP_PRUNED_DB),
+>>>>>>> Stashed changes
         config={
             "max_memory": "1.5GB",
             "threads": "2",
@@ -56,8 +84,12 @@ def create_production_snapshot():
     )
 
     try:
+<<<<<<< Updated upstream
         conn.execute(f"ATTACH '{src_db.as_posix()}' AS src (READ_ONLY);")
 
+=======
+        conn.execute(f"ATTACH '{PROD_DB.as_posix()}' AS src (READ_ONLY);")
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
@@ -66,16 +98,24 @@ def create_production_snapshot():
             CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
         """
         )
+<<<<<<< Updated upstream
 
         # 1. Keep ALL active arbitrage opportunities
+=======
+        # Keep ALL active arbitrage opportunities
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE TABLE fact_arbitrage_opportunities AS
             SELECT * FROM src.fact_arbitrage_opportunities;
         """
         )
+<<<<<<< Updated upstream
 
         # 2. Target universe: Top 700 EDHREC staples + Reserved List + All Arb Cards
+=======
+        # Target universe: Top 700 EDHREC staples + Reserved List + All Arb Cards
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE TEMP TABLE target_tracked_cards AS
@@ -86,8 +126,12 @@ def create_production_snapshot():
                OR is_reserved = true;
         """
         )
+<<<<<<< Updated upstream
 
         # 3. Features: 14 days rolling window for tracked cards (saving ~35% row volume)
+=======
+        # Features: 14 days rolling window for tracked cards
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE TABLE fact_card_features AS
@@ -96,8 +140,22 @@ def create_production_snapshot():
             WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 14 DAY FROM src.fact_card_features);
         """
         )
+<<<<<<< Updated upstream
 
         # 4. Enriched Dimension Table (tracked cards only)
+=======
+        # Retain training & backtest evaluation dataset for tracked cards
+        conn.execute(
+            """
+            CREATE TABLE fact_training_dataset AS
+            SELECT t.* EXCLUDE (finish), CAST(t.finish AS VARCHAR) AS finish
+            FROM src.fact_training_dataset t
+            JOIN target_tracked_cards c ON t.uuid = c.uuid
+            WHERE t.price_date >= (SELECT MAX(price_date) - INTERVAL 14 DAY FROM src.fact_training_dataset);
+        """
+        )
+        # Enriched Dimension Table (tracked cards only)
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE TABLE dim_cards AS
@@ -110,8 +168,12 @@ def create_production_snapshot():
               AND d.uuid IN (SELECT DISTINCT uuid FROM target_tracked_cards);
         """
         )
+<<<<<<< Updated upstream
 
         # 5. Latest Retail Price points for fast lookups
+=======
+        # Latest Retail Price points
+>>>>>>> Stashed changes
         conn.execute(
             """
             CREATE TABLE fact_prices AS
@@ -133,6 +195,7 @@ def create_production_snapshot():
             WHERE rn = 1;
         """
         )
+<<<<<<< Updated upstream
 
         # 6. Lean essential indexes (let DuckDB zonemaps handle sequential scans)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
@@ -141,16 +204,27 @@ def create_production_snapshot():
             "CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);"
         )
 
+=======
+        # Lean essential indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
+>>>>>>> Stashed changes
         conn.execute("CHECKPOINT;")
         conn.execute("VACUUM;")
         conn.execute("DETACH src;")
         conn.close()
 
+<<<<<<< Updated upstream
         if PROD_DB.exists():
             os.remove(PROD_DB)
         os.rename(temp_prod, PROD_DB)
-        size_mb = PROD_DB.stat().st_size / (1024 * 1024)
+=======
+        # 3. Atomically replace production DB with completed staging DB
+        os.replace(TEMP_PRUNED_DB, PROD_DB)
 
+>>>>>>> Stashed changes
+        size_mb = PROD_DB.stat().st_size / (1024 * 1024)
         if HAS_RICH:
             table = Table(
                 box=box.ROUNDED,
@@ -179,8 +253,14 @@ def create_production_snapshot():
         else:
             print(f"Production snapshot ready: {PROD_DB} ({size_mb:.2f} MB)")
     except Exception as e:
+<<<<<<< Updated upstream
         if temp_prod.exists():
             os.remove(temp_prod)
+=======
+        conn.close()
+        if TEMP_PRUNED_DB.exists():
+            os.remove(TEMP_PRUNED_DB)
+>>>>>>> Stashed changes
         raise e
 
 

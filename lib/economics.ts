@@ -37,6 +37,7 @@ export interface EconResult {
   feeLoadPct: number
 }
 
+export const STORE_CREDIT_MULTIPLIER = 1.30
 const PRO_COMMISSION = 0.0895
 const NONPRO_COMMISSION = 0.1075 // Exact standard marketplace commission
 const PROCESSING_RATE = 0.025
@@ -55,40 +56,85 @@ function fmt(n: number): string {
 export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[]; netPayout: number } {
   const { exitPrice, pro, taxRate, freightPerUnit, kappa } = inp
   const steps: WaterfallStep[] = []
-  let bal = exitPrice
+  let effectiveExit = exitPrice
 
-  steps.push({ key: 'gross', label: 'Projected Exit', delta: exitPrice, balance: bal, kind: 'start' })
+  // Pre-trade mapper: clamp [2.50, 2.67] dead zone to 2.49 to avoid the fee cliff
+  if (effectiveExit >= 2.50 && effectiveExit <= 2.67) {
+    effectiveExit = 2.49
+  }
 
-  const commissionRate = pro ? PRO_COMMISSION : NONPRO_COMMISSION
-  const commission = Math.min(exitPrice * commissionRate, COMMISSION_CAP)
-  bal -= commission
-  steps.push({
-    key: 'commission',
-    label: pro ? 'Seller Fee (Pro)' : 'Seller Fee (Non-Pro)',
-    delta: -commission,
-    balance: bal,
-    kind: 'fee',
-    note: `${(commissionRate * 100).toFixed(2)}% × ${fmt(exitPrice)}`,
-  })
+  let bal = effectiveExit
+  steps.push({ key: 'gross', label: 'Projected Exit', delta: effectiveExit, balance: bal, kind: 'start' })
 
-  const processing = exitPrice * (1 + taxRate) * PROCESSING_RATE
-  bal -= processing
-  steps.push({
-    key: 'processing',
-    label: 'Payment Processing',
-    delta: -processing,
-    balance: bal,
-    kind: 'fee',
-    note: `${(PROCESSING_RATE * 100).toFixed(1)}% × gross`,
-  })
+  if (effectiveExit < 0.40) {
+    bal = 0
+    steps.push({
+      key: 'floor',
+      label: 'Sub-$0.40 Listing Floor',
+      delta: -effectiveExit,
+      balance: 0,
+      kind: 'fee',
+      note: 'minimum listing floor: $0.40',
+    })
+  } else if (effectiveExit < 2.50) {
+    // Tier 1: 50% fulfillment fee (commission, processing, and fixed fees are 100% waived)
+    const tier1Fee = round(effectiveExit * 0.50)
+    bal -= tier1Fee
+    steps.push({
+      key: 'tier1_fee',
+      label: 'Direct Fee (Tier 1)',
+      delta: -tier1Fee,
+      balance: bal,
+      kind: 'fee',
+      note: '50% flat (commission & processing waived)',
+    })
+  } else {
+    // Tier 2: Standard Commission + Processing + $1.12 Direct Fee
+    const commissionRate = pro ? PRO_COMMISSION : NONPRO_COMMISSION
+    const commission = Math.min(round(effectiveExit * commissionRate), COMMISSION_CAP)
+    bal -= commission
+    steps.push({
+      key: 'commission',
+      label: pro ? 'Seller Fee (Pro)' : 'Seller Fee (Non-Pro)',
+      delta: -commission,
+      balance: bal,
+      kind: 'fee',
+      note: `${(commissionRate * 100).toFixed(2)}% × ${fmt(effectiveExit)}`,
+    })
 
-  bal -= PER_ORDER_FEE
-  steps.push({ key: 'order', label: 'Per-Order Fee', delta: -PER_ORDER_FEE, balance: bal, kind: 'fee', note: 'flat / order' })
+    const processing = round(effectiveExit * (1 + taxRate) * PROCESSING_RATE)
+    bal -= processing
+    steps.push({
+      key: 'processing',
+      label: 'Payment Processing',
+      delta: -processing,
+      balance: bal,
+      kind: 'fee',
+      note: `${(PROCESSING_RATE * 100).toFixed(1)}% × gross`,
+    })
+
+    bal -= PER_ORDER_FEE
+    steps.push({
+      key: 'order',
+      label: 'Direct Fee (Tier 2)',
+      delta: -PER_ORDER_FEE,
+      balance: bal,
+      kind: 'fee',
+      note: 'flat $1.12 / unit',
+    })
+  }
 
   bal -= freightPerUnit
-  steps.push({ key: 'freight', label: 'Outbound Freight', delta: -freightPerUnit, balance: bal, kind: 'cost', note: 'amortized batch' })
+  steps.push({
+    key: 'freight',
+    label: 'Outbound Freight',
+    delta: -freightPerUnit,
+    balance: bal,
+    kind: 'cost',
+    note: 'amortized batch',
+  })
 
-  const preHaircut = bal
+  const preHaircut = Math.max(0, bal)
   const haircut = preHaircut * (1 - kappa)
   bal -= haircut
   steps.push({
@@ -100,8 +146,8 @@ export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[];
     note: `κ = ${(kappa * 100).toFixed(1)}%`,
   })
 
-  steps.push({ key: 'net', label: 'Net Payout', delta: 0, balance: bal, kind: 'result' })
-  return { steps, netPayout: round(bal) }
+  steps.push({ key: 'net', label: 'Net Payout', delta: 0, balance: Math.max(0, bal), kind: 'result' })
+  return { steps, netPayout: Math.max(0, round(bal)) }
 }
 
 export function computeLandedBasis(inp: EconInputs): { steps: WaterfallStep[]; landedBasis: number } {
