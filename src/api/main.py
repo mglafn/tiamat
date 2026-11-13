@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from src.analytics.condition import evaluate_condition_haircut
+from src.analytics.sizing import calculate_position_size
 
 try:
     from rich.console import Console
@@ -33,38 +35,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    """
-    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
-    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
-    instability and hessian discontinuity near zero-error bounds.
-    """
-    e = y_pred - y_true
-    alpha = 0.20
-    gamma = 5.0
-    delta = 1.0
-    k = 10.0
-    
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    hess = np.maximum(hess, 1e-6)
-    
-    return grad, hess
 
 class ConformalizedLowerBoundGenerator:
     def __init__(self, alpha: float = 0.10):
@@ -98,7 +68,6 @@ class ConformalizedLowerBoundGenerator:
 for target_mod in ("__main__", "src.analytics.train_forecast", "train_forecast"):
     if target_mod not in sys.modules:
         sys.modules[target_mod] = types.ModuleType(target_mod)
-    setattr(sys.modules[target_mod], "smooth_asymmetric_huber_objective", smooth_asymmetric_huber_objective)
     setattr(sys.modules[target_mod], "ConformalizedLowerBoundGenerator", ConformalizedLowerBoundGenerator)
 
 ALLOWED_FEATURE_COLS = (
@@ -450,16 +419,17 @@ def get_forecast(
     regressor = model_artifact.get("regressor")
     cqr_generator = model_artifact.get("cqr_generator")
 
-    # Milestone 11 Multi-Quantile Engine (with fallback to legacy models)
     if q_models and calibrator and 0.90 in q_models:
         pred_q90 = q_models[0.90].predict(input_df)
         move_prob = float(calibrator.transform(pred_q90)[0])
         predicted_gain_pct = float(q_models[0.50].predict(input_df)[0])
         cqr_lpb = float(q_models[0.10].predict(input_df)[0])
-    else:
+    elif regressor:
         move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
-        predicted_gain_pct = float(regressor.predict(input_df)[0]) if regressor and (move_prob >= prob_threshold) else 0.0
-        cqr_lpb = float(cqr_generator.predict_lpb(input_df)[0]) if cqr_generator else (predicted_gain_pct - 10.0)
+        predicted_gain_pct = float(regressor.predict(input_df)[0])
+        cqr_lpb = predicted_gain_pct - 10.0
+    else:
+        move_prob, predicted_gain_pct, cqr_lpb = 0.0, 0.0, -10.0
 
     if pd.isna(move_prob): move_prob = 0.0
     if pd.isna(predicted_gain_pct): predicted_gain_pct = 0.0
@@ -473,35 +443,31 @@ def get_forecast(
     basis = (current_price * 1.075) + inbound_postage + hub_freight
     
     raw_expected_payout = calculate_direct_payout(predicted_7d_price, 0.075, clamp_dead_zone=True, is_pro=False)
-    kappa_win = calculate_condition_risk_haircut(predicted_7d_price, basis)
+    kappa_win = float(evaluate_condition_haircut(predicted_7d_price))
     payout_win = raw_expected_payout * kappa_win
     profit_win = payout_win - basis
-    
+
     assumed_fail_price = current_price * 0.90
     raw_fail_payout = calculate_direct_payout(assumed_fail_price, 0.075, clamp_dead_zone=True, is_pro=False)
-    kappa_fail = calculate_condition_risk_haircut(assumed_fail_price, basis)
+    kappa_fail = float(evaluate_condition_haircut(assumed_fail_price))
     payout_fail = raw_fail_payout * kappa_fail
     profit_fail = payout_fail - basis
-    
-    exp_net_profit = (move_prob * profit_win) + ((1.0 - move_prob) * profit_fail)
-    net_expected_roi_pct = (exp_net_profit / basis) * 100.0 if basis > 0 else 0.0
-    
-    decay_3d = float(input_df.get('price_decay_velocity_3d', pd.Series([0.0])).iloc[0])
-    if pd.isna(decay_3d): decay_3d = 0.0
 
-    amihud_val = float(input_df.get('amihud_illiquidity_30d', pd.Series([0.0])).iloc[0])
-    if pd.isna(amihud_val): amihud_val = 0.0
-    
-    est_downside = max(0.05, (predicted_gain_pct - cqr_lpb) / 100.0)
-    est_upside = max(0.05, predicted_gain_pct / 100.0)
-    f_kelly = 0.25 * (est_upside / (est_downside ** 2))
-    f_kelly = min(0.05, max(0.0, f_kelly))
-    dollar_kelly = f_kelly * 10000.0
-    amihud_cap = 0.02 / max(amihud_val, 1e-5)
-    final_dollar = min(dollar_kelly, 50.0, amihud_cap)
-    
-    allocated_units_raw = max(1.0, np.floor(final_dollar / max(basis, 0.01)))
-    allocated_units = 1 if pd.isna(allocated_units_raw) else int(allocated_units_raw)
+    p = move_prob
+    exp_net_profit = (p * profit_win) + ((1.0 - p) * profit_fail)
+    net_expected_roi_pct = (exp_net_profit / basis) * 100.0
+    decay_3d = float(input_df['price_decay_velocity_3d'].iloc[0]) if 'price_decay_velocity_3d' in input_df else 0.0
+    amihud_val = float(input_df['amihud_illiquidity_30d'].iloc[0]) if 'amihud_illiquidity_30d' in input_df else 0.0
+
+    # Sizing via centralized sizing module
+    allocated_units = int(calculate_position_size(
+        expected_roi_pct=net_expected_roi_pct,
+        lower_bound_return_pct=cqr_lpb,
+        basis=basis,
+        amihud=amihud_val,
+        portfolio_equity=10000.0,
+        max_position_dollars=50.0
+    ))
     
     veto_reasons = []
     if move_prob < prob_threshold:

@@ -171,8 +171,7 @@ export function buildTimeSeries(
 
     // Fallback volume generator if unquoted
     const dRet = pt.daily_return_pct ?? (returns[i] * 100)
-    const fallbackVol = Math.max(12, Math.round((35 + Math.abs(dRet) * 8) * (0.8 + ((i % 5) * 0.15))))
-    const volume = pt.volume != null && pt.volume > 0 ? pt.volume : fallbackVol
+    const volume = pt.volume != null 
 
     return {
       day,

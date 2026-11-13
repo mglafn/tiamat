@@ -29,32 +29,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-# --- Serialization shims for XGBoost unpickling ---
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    e = y_pred - y_true
-    alpha, gamma, delta, k = 0.20, 5.0, 1.0, 10.0
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    return grad, np.maximum(hess, 1e-6)
-
-class ConformalizedLowerBoundGenerator:
-    def __init__(self, alpha: float = 0.10):
-        self.alpha = alpha
-        self.q_hat_conformal = None
-    def predict_lpb(self, X_test):
-        return np.zeros(len(X_test))
 
 def compute_buyer_landed_cost(price: pd.Series, tax_rate: float = 0.075) -> pd.Series:
     """Acquisition price + sales tax + tiered buyer postage."""

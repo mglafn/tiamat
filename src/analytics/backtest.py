@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.ensemble import GradientBoostingRegressor
+from src.analytics.condition import evaluate_condition_haircut
+from src.analytics.sizing import calculate_position_size
 
 try:
     from rich.console import Console
@@ -22,62 +24,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    """
-    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
-    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
-    instability and hessian discontinuity near zero-error bounds.
-    """
-    e = y_pred - y_true
-    alpha = 0.20
-    gamma = 5.0
-    delta = 1.0
-    k = 10.0
-    
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    hess = np.maximum(hess, 1e-6)
-    
-    return grad, hess
 
-class ConformalizedLowerBoundGenerator:
-    def __init__(self, alpha: float = 0.10):
-        self.q_lo_model = GradientBoostingRegressor(loss='quantile', alpha=alpha / 2.0, n_estimators=100, random_state=42)
-        self.q_hi_model = GradientBoostingRegressor(loss='quantile', alpha=1.0 - (alpha / 2.0), n_estimators=100, random_state=42)
-        self.alpha = alpha
-        self.q_hat_conformal = None
-
-    def fit_and_calibrate(self, X_train, y_train, X_cal, y_cal):
-        self.q_lo_model.fit(X_train, y_train)
-        self.q_hi_model.fit(X_train, y_train)
-        q_lo_preds = self.q_lo_model.predict(X_cal)
-        q_hi_preds = self.q_hi_model.predict(X_cal)
-        scores = np.maximum(q_lo_preds - y_cal.to_numpy(), y_cal.to_numpy() - q_hi_preds)
-        n = len(y_cal)
-        q_level = np.ceil((n + 1) * (1.0 - self.alpha)) / n
-        q_level = min(1.0, max(0.0, q_level))
-        self.q_hat_conformal = float(np.quantile(scores, q_level, method='higher'))
-
-    def predict_lpb(self, X_test):
-        if self.q_hat_conformal is None:
-            raise ValueError("CQR model must be calibrated prior to generating lower prediction bounds.")
-        raw_q_lo = self.q_lo_model.predict(X_test)
-        return raw_q_lo - self.q_hat_conformal
 
 def calculate_direct_payout_series(
     prices: pd.Series,
@@ -103,18 +50,6 @@ def calculate_direct_payout_series(
     )
     return np.maximum(0.0, payout)
 
-def calculate_condition_risk_haircut(
-    direct_price: pd.Series,
-    acq_cost: pd.Series,
-    downgrade_rate: float = 0.035,
-    reject_rate: float = 0.005,
-    salvage_factor: float = 0.75
-) -> pd.Series:
-    safe_direct = np.maximum(0.40, direct_price)
-    downgrade_penalty = (safe_direct - (salvage_factor * acq_cost)) / safe_direct
-    reject_penalty = safe_direct / safe_direct
-    kappa_risk = 1.0 - (downgrade_rate * np.maximum(0.0, downgrade_penalty) + reject_rate * reject_penalty)
-    return np.clip(kappa_risk, 0.80, 1.00)
 
 def compute_uncertainty_kelly_units(
     expected_roi_pct: pd.Series,
@@ -148,15 +83,18 @@ def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd
         return out
     out = df.copy()
     if sizing == "kelly":
-        out['allocated_units'] = compute_uncertainty_kelly_units(
-            out['exp_net_roi_pct'], out['cqr_lpb'], out['basis'], out['amihud_illiquidity_30d']
+        out['allocated_units'] = calculate_position_size(
+            expected_roi_pct=out['exp_net_roi_pct'],
+            lower_bound_return_pct=out['cqr_lpb'],
+            basis=out['basis'],
+            amihud=out['amihud_illiquidity_30d']
         )
     else:
         out['allocated_units'] = 1.0
         
     out['actual_future_price'] = out['current_price'] * (1.0 + out['target_return_7d_pct'] / 100.0)
     raw_realized_payout = calculate_direct_payout_series(out['actual_future_price'], clamp_dead_zone=True, is_pro=is_pro)
-    realized_kappa = calculate_condition_risk_haircut(out['actual_future_price'], out['basis'])
+    realized_kappa = evaluate_condition_haircut(out['actual_future_price'])
     
     out['realized_exit_payout'] = raw_realized_payout * realized_kappa
     out['unit_profit'] = out['realized_exit_payout'] - out['basis']
@@ -404,16 +342,14 @@ def run_arbitrage_backtest(
     test_df['exp_exit'] = np.maximum(0.01, test_df['current_price'] * (1.0 + test_df['pred_magnitude'] / 100.0))
     
     payout_win_raw = calculate_direct_payout_series(test_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
-    kappa_win = calculate_condition_risk_haircut(test_df['exp_exit'], test_df['basis'])
+    kappa_win = evaluate_condition_haircut(test_df['exp_exit'])
     test_df['payout_win'] = payout_win_raw * kappa_win
     test_df['profit_win'] = test_df['payout_win'] - test_df['basis']
-    test_df['roi_win_pct'] = (test_df['profit_win'] / test_df['basis']) * 100.0
-    
+
     assumed_fail_price = test_df['current_price'] * 0.90
     payout_fail_raw = calculate_direct_payout_series(assumed_fail_price, clamp_dead_zone=True, is_pro=is_pro)
-    kappa_fail = calculate_condition_risk_haircut(assumed_fail_price, test_df['basis'])
+    kappa_fail = evaluate_condition_haircut(assumed_fail_price)
     test_df['payout_fail'] = payout_fail_raw * kappa_fail
-    test_df['profit_fail'] = test_df['payout_fail'] - test_df['basis']
     
     p = test_df['move_prob']
     test_df['exp_net_profit'] = (p * test_df['profit_win']) + ((1.0 - p) * test_df['profit_fail'])
@@ -421,9 +357,9 @@ def run_arbitrage_backtest(
     
     stage1_mask = (test_df['move_prob'] >= prob_threshold) & (test_df['pred_magnitude'] > 0.0)
     cqr_safety_mask = test_df['cqr_lpb'] >= -5.0
-    decay_filter = test_df['price_decay_velocity_3d'] >= -0.005
+    decay_filter = test_df['price_decay_velocity_3d'] >= -0.5
     roi_hurdle_mask = test_df['exp_net_roi_pct'] >= min_net_roi_pct
-    naive_mask = stage1_mask & (test_df['roi_win_pct'] >= min_net_roi_pct)
+    naive_mask = stage1_mask & (((test_df['profit_win'] / test_df['basis']) * 100.0) >= min_net_roi_pct)
     active_mask = stage1_mask & cqr_safety_mask & decay_filter & roi_hurdle_mask
     
     funnel_counts = {

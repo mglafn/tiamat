@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.ensemble import GradientBoostingRegressor
+from src.analytics.condition import evaluate_condition_haircut
+from src.analytics.sizing import calculate_position_size
 
 try:
     from rich.console import Console
@@ -24,62 +26,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
 MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-def smooth_asymmetric_huber_objective(y_true, y_pred):
-    """
-    Smooth Asymmetric Expectile Huber Loss (SAEHL) for XGBoost.
-    Guarantees C^2 differentiability across residuals to prevent Newton-Raphson leaf weight 
-    instability and hessian discontinuity near zero-error bounds.
-    """
-    e = y_pred - y_true
-    alpha = 0.20
-    gamma = 5.0
-    delta = 1.0
-    k = 10.0
-    
-    sig = 1.0 / (1.0 + np.exp(-k * e))
-    dsig = k * sig * (1.0 - sig)
-    ddsig = k * k * sig * (1.0 - sig) * (1.0 - 2.0 * sig)
-    
-    scale_factor = 1.0 - 2.0 * alpha + gamma
-    w = alpha + scale_factor * sig
-    dw = scale_factor * dsig
-    ddw = scale_factor * ddsig
-    
-    u = e / delta
-    sqrt_term = np.sqrt(1.0 + u**2)
-    l_huber = 2.0 * (delta**2) * (sqrt_term - 1.0)
-    dl_huber = 2.0 * e / sqrt_term
-    ddl_huber = 2.0 / (sqrt_term**3)
-    
-    grad = dw * l_huber + w * dl_huber
-    hess = ddw * l_huber + 2.0 * dw * dl_huber + w * ddl_huber
-    hess = np.maximum(hess, 1e-6)
-    
-    return grad, hess
 
-class ConformalizedLowerBoundGenerator:
-    def __init__(self, alpha: float = 0.10):
-        self.q_lo_model = GradientBoostingRegressor(loss='quantile', alpha=alpha / 2.0, n_estimators=100, random_state=42)
-        self.q_hi_model = GradientBoostingRegressor(loss='quantile', alpha=1.0 - (alpha / 2.0), n_estimators=100, random_state=42)
-        self.alpha = alpha
-        self.q_hat_conformal = None
-
-    def fit_and_calibrate(self, X_train, y_train, X_cal, y_cal):
-        self.q_lo_model.fit(X_train, y_train)
-        self.q_hi_model.fit(X_train, y_train)
-        q_lo_preds = self.q_lo_model.predict(X_cal)
-        q_hi_preds = self.q_hi_model.predict(X_cal)
-        scores = np.maximum(q_lo_preds - y_cal.to_numpy(), y_cal.to_numpy() - q_hi_preds)
-        n = len(y_cal)
-        q_level = np.ceil((n + 1) * (1.0 - self.alpha)) / n
-        q_level = min(1.0, max(0.0, q_level))
-        self.q_hat_conformal = float(np.quantile(scores, q_level, method='higher'))
-
-    def predict_lpb(self, X_test):
-        if self.q_hat_conformal is None:
-            raise ValueError("CQR model must be calibrated prior to generating lower prediction bounds.")
-        raw_q_lo = self.q_lo_model.predict(X_test)
-        return raw_q_lo - self.q_hat_conformal
 
 def calculate_direct_payout_series(
     prices: pd.Series,
@@ -105,18 +52,6 @@ def calculate_direct_payout_series(
     )
     return np.maximum(0.0, payout)
 
-def calculate_condition_risk_haircut(
-    direct_price: pd.Series,
-    acq_cost: pd.Series,
-    downgrade_rate: float = 0.035,
-    reject_rate: float = 0.005,
-    salvage_factor: float = 0.75
-) -> pd.Series:
-    safe_direct = np.maximum(0.40, direct_price)
-    downgrade_penalty = (safe_direct - (salvage_factor * acq_cost)) / safe_direct
-    reject_penalty = safe_direct / safe_direct
-    kappa_risk = 1.0 - (downgrade_rate * np.maximum(0.0, downgrade_penalty) + reject_rate * reject_penalty)
-    return np.clip(kappa_risk, 0.80, 1.00)
 
 def compute_uncertainty_kelly_units(
     expected_roi_pct: pd.Series,
@@ -374,13 +309,19 @@ def scan_live_market(
         return {"status": "empty", "message": "No active market records found"} if as_dict else None
         
     X_live = market_df[feature_cols].fillna(0.0)
-    market_df['move_prob'] = classifier.predict_proba(X_live)[:, 1]
-    market_df['pred_magnitude'] = regressor.predict(X_live)
-    
-    if cqr_generator:
-        market_df['cqr_lpb'] = cqr_generator.predict_lpb(X_live)
-    else:
+    if q_models and calibrator and 0.90 in q_models:
+        preds_q90 = q_models[0.90].predict(X_live)
+        market_df['move_prob'] = calibrator.transform(preds_q90)
+        market_df['pred_magnitude'] = q_models[0.50].predict(X_live)
+        market_df['cqr_lpb'] = q_models[0.10].predict(X_live)
+    elif classifier and regressor:
+        market_df['move_prob'] = classifier.predict_proba(X_live)[:, 1]
+        market_df['pred_magnitude'] = regressor.predict(X_live)
         market_df['cqr_lpb'] = market_df['pred_magnitude'] - 10.0
+    else:
+        market_df['move_prob'] = 0.0
+        market_df['pred_magnitude'] = 0.0
+        market_df['cqr_lpb'] = -10.0
         
     inbound_postage = np.where(market_df['current_price'] < 5.00, 0.99, 0.15)
     hub_freight = 0.012
@@ -388,22 +329,26 @@ def scan_live_market(
     market_df['exp_exit'] = np.maximum(0.01, market_df['current_price'] * (1.0 + market_df['pred_magnitude'] / 100.0))
     
     payout_win_raw = calculate_direct_payout_series(market_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
-    kappa_win = calculate_condition_risk_haircut(market_df['exp_exit'], market_df['basis'])
+    kappa_win = evaluate_condition_haircut(market_df['exp_exit'])
     market_df['exp_exit_payout'] = payout_win_raw * kappa_win
     market_df['profit_win'] = market_df['exp_exit_payout'] - market_df['basis']
-    
+
     fail_price = market_df['current_price'] * 0.90
     payout_fail_raw = calculate_direct_payout_series(fail_price, clamp_dead_zone=True, is_pro=is_pro)
-    kappa_fail = calculate_condition_risk_haircut(fail_price, market_df['basis'])
+    kappa_fail = evaluate_condition_haircut(fail_price)
     market_df['profit_fail'] = (payout_fail_raw * kappa_fail) - market_df['basis']
-    
+
     p = market_df['move_prob']
     market_df['exp_net_profit'] = (p * market_df['profit_win']) + ((1.0 - p) * market_df['profit_fail'])
     market_df['exp_net_roi_pct'] = (market_df['exp_net_profit'] / market_df['basis']) * 100.0
-    
+
+    # Position sizing:
     if sizing == "kelly":
-        market_df['allocated_units'] = compute_uncertainty_kelly_units(
-            market_df['exp_net_roi_pct'], market_df['cqr_lpb'], market_df['basis'], market_df['amihud_illiquidity_30d']
+        market_df['allocated_units'] = calculate_position_size(
+            expected_roi_pct=market_df['exp_net_roi_pct'],
+            lower_bound_return_pct=market_df['cqr_lpb'],
+            basis=market_df['basis'],
+            amihud=market_df['amihud_illiquidity_30d']
         )
     else:
         market_df['allocated_units'] = 1.0

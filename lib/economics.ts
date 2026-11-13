@@ -59,31 +59,46 @@ export function computeExitWaterfall(inp: EconInputs): { steps: WaterfallStep[];
 
   steps.push({ key: 'gross', label: 'Projected Exit', delta: exitPrice, balance: bal, kind: 'start' })
 
-  const commissionRate = pro ? PRO_COMMISSION : NONPRO_COMMISSION
-  const commission = Math.min(exitPrice * commissionRate, COMMISSION_CAP)
-  bal -= commission
-  steps.push({
-    key: 'commission',
-    label: pro ? 'Seller Fee (Pro)' : 'Seller Fee (Non-Pro)',
-    delta: -commission,
-    balance: bal,
-    kind: 'fee',
-    note: `${(commissionRate * 100).toFixed(2)}% × ${fmt(exitPrice)}`,
-  })
+  // TCGplayer Direct Tier 1: Sub-$2.50 Flat 50% Rule (waives commission & processing)
+  if (exitPrice < 2.50) {
+    const flatTierFee = exitPrice * 0.50
+    bal -= flatTierFee
+    steps.push({
+      key: 'commission',
+      label: 'Direct Fee (<$2.50 Flat 50%)',
+      delta: -flatTierFee,
+      balance: bal,
+      kind: 'fee',
+      note: '50% flat fee (commission waived)',
+    })
+  } else {
+    // TCGplayer Direct Tier 2: $2.50+ Standard Schedule
+    const commissionRate = pro ? PRO_COMMISSION : NONPRO_COMMISSION
+    const commission = Math.min(exitPrice * commissionRate, COMMISSION_CAP)
+    bal -= commission
+    steps.push({
+      key: 'commission',
+      label: pro ? 'Seller Fee (Pro)' : 'Seller Fee (Non-Pro)',
+      delta: -commission,
+      balance: bal,
+      kind: 'fee',
+      note: `${(commissionRate * 100).toFixed(2)}% × ${fmt(exitPrice)}`,
+    })
 
-  const processing = exitPrice * (1 + taxRate) * PROCESSING_RATE
-  bal -= processing
-  steps.push({
-    key: 'processing',
-    label: 'Payment Processing',
-    delta: -processing,
-    balance: bal,
-    kind: 'fee',
-    note: `${(PROCESSING_RATE * 100).toFixed(1)}% × gross`,
-  })
+    const processing = exitPrice * (1 + taxRate) * PROCESSING_RATE
+    bal -= processing
+    steps.push({
+      key: 'processing',
+      label: 'Payment Processing',
+      delta: -processing,
+      balance: bal,
+      kind: 'fee',
+      note: `${(PROCESSING_RATE * 100).toFixed(1)}% × gross`,
+    })
 
-  bal -= PER_ORDER_FEE
-  steps.push({ key: 'order', label: 'Per-Order Fee', delta: -PER_ORDER_FEE, balance: bal, kind: 'fee', note: 'flat / order' })
+    bal -= PER_ORDER_FEE
+    steps.push({ key: 'order', label: 'Direct Fixed Fee', delta: -PER_ORDER_FEE, balance: bal, kind: 'fee', note: '$1.12 / unit' })
+  }
 
   bal -= freightPerUnit
   steps.push({ key: 'freight', label: 'Outbound Freight', delta: -freightPerUnit, balance: bal, kind: 'cost', note: 'amortized batch' })
