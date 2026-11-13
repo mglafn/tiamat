@@ -57,11 +57,11 @@ export const apiClient = {
       `/api/v1/arbitrage?min_spread=${minSpread}${finishParam}&limit=${limit}`
     )
   },
-  getHistory: (uuid: string, vendor = "tcgplayer", finish = "normal", days = 60) =>
+  getHistory: (uuid: string, finish = "normal", days = 60) =>
     apiFetch<PriceHistoryPoint[]>(
       `/api/v1/card/history/${encodeURIComponent(uuid)}?finish=${encodeURIComponent(finish)}&days=${days}`
     ),
-  getForecast: (uuid: string, vendor = "tcgplayer", finish = "normal") =>
+  getForecast: (uuid: string, finish = "normal") =>
     apiFetch<PredictionResponse>(
       `/api/v1/forecast/${encodeURIComponent(uuid)}?finish=${encodeURIComponent(finish)}`
     ),

@@ -108,7 +108,7 @@ export function SetSelector({
         {currentCollectorNumber && (
           <span className="text-dim font-normal">#{currentCollectorNumber}</span>
         )}
-        <span className="rounded bg-surface-3 px-1 py-0.2 text-[8.5px] font-bold text-muted-foreground">
+        <span className="rounded bg-surface-3 px-1 py-[1px] text-[8.5px] font-bold text-muted-foreground">
           {printings.length}
         </span>
         <ChevronDown
@@ -186,7 +186,7 @@ export function SetSelector({
                           {usd(p.floor_price, { compact: true })}
                         </span>
                       ) : (
-                        <span className="rounded-sm border border-border/40 bg-panel px-1 py-0.2 text-[8px] font-bold text-dim uppercase">
+                        <span className="rounded-sm border border-border/40 bg-panel px-1 py-[1px] text-[8px] font-bold text-dim uppercase">
                           UNQUOTED
                         </span>
                       )}

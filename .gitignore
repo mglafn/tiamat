@@ -24,7 +24,6 @@ htmlcov/
 *.log
 *.tmp
 *.temp
-pnpm-lock.yaml
 .DS_Store
 
 # Raw ETL feeds & oversized database dumps
@@ -35,9 +34,7 @@ cards.csv
 repomix-output.xml
 data/mtg_prices_full.duckdb
 
-# .repomixignore
+# Legacy local UI stubs
 lib/mock-data.ts
 components/terminal/methodology-modal.tsx
 components/terminal/strategy-lab-modal.tsx
-components/terminal/forecast-panel.tsx
-README.md

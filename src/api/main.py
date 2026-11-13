@@ -1,22 +1,17 @@
 import os
 import sys
-import types
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
-from decimal import Decimal, ROUND_HALF_EVEN
+from typing import List, Optional
 import duckdb
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingRegressor
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from src.analytics.condition import evaluate_condition_haircut
-from src.analytics.sizing import calculate_position_size
 
 try:
     from rich.console import Console
@@ -32,52 +27,16 @@ except ImportError:
 logger = logging.getLogger("uvicorn.error")
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
+from src.config import DB_PATH, MODEL_PATH, FEATURE_COLS, FEE_CONFIG, MODEL_CONFIG
+from src.pricing.fees import calculate_direct_payout, landed_basis
+from src.analytics.condition import evaluate_condition_haircut
+from src.analytics.sizing import calculate_position_size
 
-class ConformalizedLowerBoundGenerator:
-    def __init__(self, alpha: float = 0.10):
-        self.q_lo_model = GradientBoostingRegressor(loss='quantile', alpha=alpha / 2.0, n_estimators=100, random_state=42)
-        self.q_hi_model = GradientBoostingRegressor(loss='quantile', alpha=1.0 - (alpha / 2.0), n_estimators=100, random_state=42)
-        self.alpha = alpha
-        self.q_hat_conformal = None
-        
-    def fit_and_calibrate(self, X_train, y_train, X_cal, y_cal):
-        self.q_lo_model.fit(X_train, y_train)
-        self.q_hi_model.fit(X_train, y_train)
-        q_lo_preds = self.q_lo_model.predict(X_cal)
-        q_hi_preds = self.q_hi_model.predict(X_cal)
-        scores = np.maximum(q_lo_preds - y_cal.to_numpy(), y_cal.to_numpy() - q_hi_preds)
-        n = len(y_cal)
-        q_level = np.ceil((n + 1) * (1.0 - self.alpha)) / n
-        q_level = min(1.0, max(0.0, q_level))
-        self.q_hat_conformal = float(np.quantile(scores, q_level, method='higher'))
-        
-    def predict_lpb(self, X_test):
-        if self.q_hat_conformal is None:
-            raise ValueError("CQR model must be calibrated prior to generating lower prediction bounds.")
-        raw_q_lo = self.q_lo_model.predict(X_test)
-        return raw_q_lo - self.q_hat_conformal
+ALLOWED_FEATURE_COLS = tuple(FEATURE_COLS)
 
-# =====================================================================
-# UNPICKLE COMPATIBILITY SHIM FOR UVICORN/RENDER
-# Injects custom classes and loss functions into __main__ so joblib
-# can deserialize artifacts trained from standalone scripts.
-# =====================================================================
-for target_mod in ("__main__", "src.analytics.train_forecast", "train_forecast"):
-    if target_mod not in sys.modules:
-        sys.modules[target_mod] = types.ModuleType(target_mod)
-    setattr(sys.modules[target_mod], "ConformalizedLowerBoundGenerator", ConformalizedLowerBoundGenerator)
-
-ALLOWED_FEATURE_COLS = (
-    'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
-    'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
-    'price_decay_velocity_3d', 'amihud_illiquidity_30d',
-    'z_downside_3d', 'velocity_3d', 'accel_3d', 'exhaustion_ratio',
-    'is_foil', 'is_reserved', 'mana_value', 'popularity_score',
-    'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
-)
 
 FEATURE_SCHEMA = {
     'sma_ratio': (float, 1.0),
@@ -105,48 +64,6 @@ FEATURE_SCHEMA = {
 
 model_artifact = None
 
-def calculate_direct_payout(
-    price: float,
-    tax_rate: float = 0.075,
-    clamp_dead_zone: bool = True,
-    is_pro: bool = False
-) -> float:
-    d_price = Decimal(str(round(price, 4)))
-    d_tax = Decimal(str(tax_rate))
-    
-    if d_price < Decimal('0.40'):
-        return 0.00
-        
-    if clamp_dead_zone and Decimal('2.50') <= d_price <= Decimal('2.67'):
-        d_price = Decimal('2.49')
-        
-    if d_price < Decimal('2.50'):
-        fee = (d_price * Decimal('0.50')).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
-        return float(d_price - fee)
-        
-    direct_fixed = Decimal('1.12')
-    commission = min(d_price * Decimal('0.0895'), Decimal('75.00'))
-    pro_fee = min(d_price * Decimal('0.025'), Decimal('75.00')) if is_pro else Decimal('0.00')
-    gross_total = d_price * (Decimal('1.00') + d_tax)
-    processing_fee = gross_total * Decimal('0.025')
-    
-    total_fee = (direct_fixed + commission + pro_fee + processing_fee).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)
-    payout = max(Decimal('0.00'), d_price - total_fee)
-    return float(payout.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN))
-
-def calculate_condition_risk_haircut(
-    direct_price: float,
-    acq_cost: float,
-    downgrade_rate: float = 0.035,
-    reject_rate: float = 0.005,
-    salvage_factor: float = 0.75
-) -> float:
-    safe_direct = max(0.40, direct_price)
-    downgrade_penalty = (safe_direct - (salvage_factor * acq_cost)) / safe_direct
-    reject_penalty = 1.0
-    penalty = (downgrade_rate * max(0.0, downgrade_penalty)) + (reject_rate * reject_penalty)
-    kappa_risk = 1.0 - penalty
-    return float(max(0.80, min(1.00, kappa_risk)))
 
 def sanitize_features_for_inference(feature_cols: list, feature_vals: tuple) -> pd.DataFrame:
     data = dict(zip(feature_cols, feature_vals))
@@ -190,17 +107,16 @@ async def lifespan(app: FastAPI):
             logger.info("Deserializing XGBoost model artifact...")
             model_artifact = joblib.load(MODEL_PATH)
             metrics = model_artifact.get("metrics", {})
-            tau = metrics.get("prob_threshold", 0.90)
-            mae = metrics.get("mae_pct", 3.866)
+            tau = metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
+            mae = metrics.get("mae_pct", 0.0)
             
             if HAS_RICH:
                 diag_table = Table(box=box.ROUNDED, border_style="green", show_header=True, header_style="bold green")
                 diag_table.add_column("Subsystem Artifact", style="bold white")
                 diag_table.add_column("Calibration Metric", justify="right", style="cyan")
                 diag_table.add_column("Online Status", justify="right", style="bold green")
-                diag_table.add_row("Stage 1 Spike Hurdle Gate (XGBClassifier)", f"Conviction Threshold τ = {tau:.4f}", "ONLINE")
-                diag_table.add_row("Stage 2 Magnitude Engine (SAEHL XGBRegressor)", f"Forecast MAE = {mae:.3f}%", "ONLINE")
-                diag_table.add_row("Conformal Lower Prediction Bound (CQR)", "Coverage Target: 90.0% (Empirical: 94.6%)", "CALIBRATED")
+                diag_table.add_row("Multi-Quantile Engine (XGBoost q10/q50/q90)", f"Median q50 MAE = {mae:.3f}%", "ONLINE")
+                diag_table.add_row("Buyer Radar Calibrator (Isotonic q90)", f"Alert Threshold τ_buyer = {tau:.4f}", "CALIBRATED")
                 diag_table.add_row("DuckDB Columnar Physical Layout", "ENUM Dictionary Types + Min-Max Zonemaps", "READ_ONLY ASOF")
                 console.print(Panel(diag_table, title="[bold green]Predictive Subsystem Ready for Inference[/bold green]", box=box.ROUNDED))
                 console.print()
@@ -357,9 +273,9 @@ def health_check():
 
 @app.get("/api/v1/backtest", tags=["Analytics"])
 def get_backtest_simulation(
-    hurdle: float = Query(8.0, ge=0.0, le=50.0),
-    tau: Optional[float] = Query(None, ge=0.5, le=0.99),
-    filter_mode: str = Query("cqr_veto", pattern="^(cqr_veto|exp_roi|win_roi|kelly)$"),
+    hurdle: float = Query(MODEL_CONFIG["DEFAULT_ROI_HURDLE_PCT"], ge=0.0, le=50.0),
+    tau: Optional[float] = Query(None, ge=0.05, le=0.99),
+    filter_mode: str = Query("cqr_veto", pattern="^(cqr_veto|exp_roi|win_roi)$"),
     sizing: str = Query("kelly", pattern="^(flat|kelly)$"),
     top_daily: int = Query(0, ge=0, le=20),
     is_pro: bool = Query(False)
@@ -376,12 +292,14 @@ def get_backtest_simulation(
             as_dict=True
         )
         return results
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backtest simulation failed: {str(e)}")
 
 @app.get("/api/v1/forecast/{card_uuid}", response_model=PredictionResponse, tags=["Predictive"])
 def get_forecast(
-    card_uuid: str, finish: str = Query("normal"),
+    card_uuid: str, finish: str = Query("normal"), is_pro: bool = Query(False),
     db_conn: duckdb.DuckDBPyConnection = Depends(get_db)
 ):
     if not model_artifact:
@@ -407,29 +325,24 @@ def get_forecast(
         
     current_price, active_vendor, feature_vals = float(row[0]) if row[0] is not None else 0.0, row[1], row[2:]
     input_df = sanitize_features_for_inference(feature_cols, feature_vals)
-    
+
     metrics = model_artifact.get("metrics", {})
-    mae_pct = metrics.get("mae_pct", 3.866)
-    directional_acc = metrics.get("directional_accuracy_pct", 67.3)
-    prob_threshold = metrics.get("prob_threshold", 0.90)
-    
+    mae_pct = metrics.get("mae_pct", 0.0)
+    # PLACEHOLDER: Uses calibrated buyer spike threshold pending dedicated Flipper entry rule
+    prob_threshold = metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
+
     q_models = model_artifact.get("quantile_models", {})
     calibrator = model_artifact.get("isotonic_calibrator")
-    classifier = model_artifact.get("classifier")
-    regressor = model_artifact.get("regressor")
-    cqr_generator = model_artifact.get("cqr_generator")
 
-    if q_models and calibrator and 0.90 in q_models:
-        pred_q90 = q_models[0.90].predict(input_df)
-        move_prob = float(calibrator.transform(pred_q90)[0])
-        predicted_gain_pct = float(q_models[0.50].predict(input_df)[0])
-        cqr_lpb = float(q_models[0.10].predict(input_df)[0])
-    elif regressor:
-        move_prob = float(classifier.predict_proba(input_df)[0][1]) if classifier else 0.0
-        predicted_gain_pct = float(regressor.predict(input_df)[0])
-        cqr_lpb = predicted_gain_pct - 10.0
+    if q_models and calibrator and all(q in q_models for q in (0.10, 0.50, 0.90)):
+        raw_q50 = q_models[0.50].predict(input_df)
+        raw_q90 = np.maximum(q_models[0.90].predict(input_df), raw_q50)
+        raw_q10 = np.minimum(q_models[0.10].predict(input_df), raw_q50)
+        move_prob = float(calibrator.transform(raw_q90)[0])
+        predicted_gain_pct = float(raw_q50[0])
+        cqr_lpb = float(raw_q10[0])
     else:
-        move_prob, predicted_gain_pct, cqr_lpb = 0.0, 0.0, -10.0
+        move_prob, predicted_gain_pct, cqr_lpb = 0.0, 0.0, MODEL_CONFIG["Q10_FLOOR_PCT"]
 
     if pd.isna(move_prob): move_prob = 0.0
     if pd.isna(predicted_gain_pct): predicted_gain_pct = 0.0
@@ -438,28 +351,21 @@ def get_forecast(
     predicted_7d_price = max(0.01, round(current_price * (1.0 + (predicted_gain_pct / 100.0)), 2))
     model_mae_dollars = round(current_price * (mae_pct / 100.0), 4)
     
-    inbound_postage = 0.99 if current_price < 5.00 else 0.15
-    hub_freight = 0.012
-    basis = (current_price * 1.075) + inbound_postage + hub_freight
-    
-    raw_expected_payout = calculate_direct_payout(predicted_7d_price, 0.075, clamp_dead_zone=True, is_pro=False)
+    default_tax = FEE_CONFIG["DEFAULT_TAX_RATE"]
+    basis = landed_basis(current_price, tax_rate=default_tax, channel="direct")
+
+    raw_expected_payout = calculate_direct_payout(
+        predicted_7d_price, default_tax, clamp_dead_zone=True, is_pro=is_pro
+    )
     kappa_win = float(evaluate_condition_haircut(predicted_7d_price))
     payout_win = raw_expected_payout * kappa_win
     profit_win = payout_win - basis
 
-    assumed_fail_price = current_price * 0.90
-    raw_fail_payout = calculate_direct_payout(assumed_fail_price, 0.075, clamp_dead_zone=True, is_pro=False)
-    kappa_fail = float(evaluate_condition_haircut(assumed_fail_price))
-    payout_fail = raw_fail_payout * kappa_fail
-    profit_fail = payout_fail - basis
-
-    p = move_prob
-    exp_net_profit = (p * profit_win) + ((1.0 - p) * profit_fail)
+    exp_net_profit = profit_win
     net_expected_roi_pct = (exp_net_profit / basis) * 100.0
     decay_3d = float(input_df['price_decay_velocity_3d'].iloc[0]) if 'price_decay_velocity_3d' in input_df else 0.0
     amihud_val = float(input_df['amihud_illiquidity_30d'].iloc[0]) if 'amihud_illiquidity_30d' in input_df else 0.0
 
-    # Sizing via centralized sizing module
     allocated_units = int(calculate_position_size(
         expected_roi_pct=net_expected_roi_pct,
         lower_bound_return_pct=cqr_lpb,
@@ -468,19 +374,28 @@ def get_forecast(
         portfolio_equity=10000.0,
         max_position_dollars=50.0
     ))
-    
+
+    q10_floor = MODEL_CONFIG["Q10_FLOOR_PCT"]
+    decay_floor = MODEL_CONFIG["DECAY_VELOCITY_FLOOR_PCT"]
+    roi_hurdle = MODEL_CONFIG["DEFAULT_ROI_HURDLE_PCT"]
     veto_reasons = []
     if move_prob < prob_threshold:
         veto_reasons.append(f"Insufficient Spike Probability ({move_prob:.1%} < {prob_threshold:.1%})")
-    if cqr_lpb < -15.0:
-        veto_reasons.append(f"CQR Statistical Floor Breach ({cqr_lpb:.1f}% < -15.0%)")
-    if decay_3d < -0.5:
-        veto_reasons.append(f"Active Price Decay / Falling Knife ({decay_3d:.2f}%/day < -0.50%/day)")
-    if net_expected_roi_pct < 8.0:
-        veto_reasons.append(f"Net ROI Below Hurdle ({net_expected_roi_pct:.1f}% < 8.0%)")
-        
-    is_clamped = True if 2.50 <= predicted_7d_price <= 2.67 else False
-    
+    if cqr_lpb < q10_floor:
+        veto_reasons.append(f"Downside Floor Breach ({cqr_lpb:.1f}% < {q10_floor:.1f}%)")
+    if decay_3d < decay_floor:
+        veto_reasons.append(f"Active Price Decay / Falling Knife ({decay_3d:.2f}%/day < {decay_floor:.2f}%/day)")
+    if net_expected_roi_pct < roi_hurdle:
+        veto_reasons.append(f"Net ROI Below Hurdle ({net_expected_roi_pct:.1f}% < {roi_hurdle:.1f}%)")
+    if basis > 50.0 or (allocated_units <= 0 and cqr_lpb >= q10_floor and net_expected_roi_pct > 0.0):
+        veto_reasons.append("Position Exceeds Capital Ceiling ($50.00)")
+
+    dead_zone_max = FEE_CONFIG["DIRECT_DEAD_ZONE_MAX_PRO"] if is_pro else FEE_CONFIG["DIRECT_DEAD_ZONE_MAX"]
+    is_clamped = (
+        FEE_CONFIG["DIRECT_DEAD_ZONE_MIN"]
+        <= predicted_7d_price
+        <= dead_zone_max
+    )
     return PredictionResponse(
         uuid=card_uuid,
         vendor="consensus",
@@ -493,7 +408,7 @@ def get_forecast(
         cqr_lpb=round(cqr_lpb, 2),
         price_decay_velocity_3d=round(decay_3d, 2),
         amihud_illiquidity_30d=round(amihud_val, 6),
-        directional_accuracy_pct=directional_acc,
+        directional_accuracy_pct=None,
         expected_net_payout=round(payout_win, 2),
         net_expected_roi_pct=round(net_expected_roi_pct, 2),
         is_dead_zone_clamped=is_clamped,
@@ -565,7 +480,7 @@ def get_card_printings(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depe
         latest_prices AS (
             SELECT uuid, price AS floor_price
             FROM fact_prices
-            WHERE format = 'paper' AND list_type = 'retail'
+            WHERE format = 'paper' AND list_type = 'retail' AND vendor != 'cardmarket'
             QUALIFY ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY price_date DESC, price ASC) = 1
         )
         SELECT
@@ -573,11 +488,11 @@ def get_card_printings(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depe
         FROM dim_cards d
         LEFT JOIN latest_prices p ON d.uuid = p.uuid
         WHERE d.name = (SELECT name FROM target_card) AND d.is_online_only = false
-        ORDER BY d.set_code ASC, d.collector_number ASC
+        ORDER BY (d.uuid = ?) DESC, d.set_code ASC, d.collector_number ASC
         LIMIT 40
     """
     try:
-        rows = db_conn.cursor().execute(query, [card_uuid]).fetchall()
+        rows = db_conn.cursor().execute(query, [card_uuid, card_uuid]).fetchall()
         return [
             CardVariant(
                 uuid=r[0], set_code=r[1], collector_number=str(r[2]) if r[2] else None,
@@ -623,7 +538,7 @@ def search_card_by_name(
         WITH latest_prices AS (
             SELECT uuid, finish, vendor, price
             FROM fact_prices
-            WHERE list_type = 'retail' AND format = 'paper'
+            WHERE list_type = 'retail' AND format = 'paper' AND vendor != 'cardmarket'
             QUALIFY ROW_NUMBER() OVER(PARTITION BY uuid, finish, vendor ORDER BY price_date DESC) = 1
         )
         SELECT
@@ -689,7 +604,7 @@ def get_card_summary(card_uuid: str, db_conn: duckdb.DuckDBPyConnection = Depend
     agg_query = """
         WITH latest_vendor_prices AS (
             SELECT vendor, price as current_price, price_date FROM fact_prices
-            WHERE uuid = ? AND finish = ? AND format = 'paper' AND list_type = 'retail'
+            WHERE uuid = ? AND finish = ? AND format = 'paper' AND list_type = 'retail' AND vendor != 'cardmarket'
             QUALIFY ROW_NUMBER() OVER (PARTITION BY vendor ORDER BY price_date DESC) = 1
         )
         SELECT MIN(current_price), AVG(current_price), MAX(current_price), MAX(price_date)

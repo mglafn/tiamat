@@ -10,8 +10,8 @@ import sys
 import argparse
 from pathlib import Path
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
 
 try:
@@ -26,20 +26,18 @@ except ImportError:
     HAS_RICH = False
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
+from src.config import DB_PATH, MODEL_PATH, FEE_CONFIG, MODEL_CONFIG
+from src.pricing.fees import landed_basis_series
 
-def compute_buyer_landed_cost(price: pd.Series, tax_rate: float = 0.075) -> pd.Series:
-    """Acquisition price + sales tax + tiered buyer postage."""
-    inbound_postage = np.where(price < 5.00, 0.99, 0.15)
-    return (price * (1.0 + tax_rate)) + inbound_postage
 
 def scan_buyer_dips(
     min_discount_pct: float = 8.0,
     max_edhrec_rank: int = 1500,
     min_price: float = 1.50,
-    tax_rate: float = 0.075,
+    tax_rate: float = FEE_CONFIG["DEFAULT_TAX_RATE"],
     top_n: int = 8,
     reserved_only: bool = False,
     db_path: Path = DB_PATH,
@@ -60,6 +58,8 @@ def scan_buyer_dips(
                 f.uuid, f.finish, f.price_date, f.current_price,
                 f.sma_7, f.sma_30, f.daily_return_pct, f.velocity_7d_pct,
                 f.price_decay_velocity_3d, f.volatility_14d, f.amihud_illiquidity_30d,
+                f.z_downside_3d, f.velocity_3d, f.accel_3d, f.exhaustion_ratio,
+                f.microstructure_regime,
                 f.is_foil, f.is_reserved, f.mana_value, f.popularity_score,
                 f.is_land, f.is_creature, f.asset_age_years, f.rarity_score,
                 f.sma_ratio, f.bid_ask_spread_pct, f.spread_velocity_7d, f.vendor_delta_7d,
@@ -88,51 +88,49 @@ def scan_buyer_dips(
     # 2. Compute Buyer Value & Discount Metrics
     df['discount_sma30_pct'] = ((df['sma_30'] - df['current_price']) / df['sma_30']) * 100.0
     df['dollar_savings'] = df['sma_30'] - df['current_price']
-    
-    # Statistical Z-score against volatility
-    dollar_vol = np.maximum(0.05, df['current_price'] * (df['volatility_14d'] / 100.0))
-    df['z_score'] = (df['current_price'] - df['sma_30']) / dollar_vol
-    df['buyer_landed_cost'] = compute_buyer_landed_cost(df['current_price'], tax_rate=tax_rate)
+    df['buyer_landed_cost'] = landed_basis_series(df['current_price'], tax_rate=tax_rate, channel="buyer")
 
     # 3. Model Inference (Pre-Spike Alerts)
+
     df['move_prob'] = 0.0
     df['pred_spike_pct'] = 0.0
-    prob_threshold = 0.85
+    prob_threshold = 0.40
 
     if model_path.exists():
         try:
             artifact = joblib.load(model_path)
-            classifier = artifact.get("classifier")
-            regressor = artifact.get("regressor")
+            q_models = artifact.get("quantile_models", {})
+            calibrator = artifact.get("isotonic_calibrator")
             feature_cols = artifact.get("feature_cols", [])
-            prob_threshold = artifact.get("metrics", {}).get("prob_threshold", 0.85)
+            prob_threshold = artifact.get("metrics", {}).get("tau_buyer_radar", artifact.get("metrics", {}).get("prob_threshold", 0.40))
 
-            if classifier and all(c in df.columns for c in feature_cols):
+            if all(c in df.columns for c in feature_cols):
                 X = df[feature_cols].fillna(0.0)
-                df['move_prob'] = classifier.predict_proba(X)[:, 1]
-                if regressor:
-                    df['pred_spike_pct'] = regressor.predict(X)
+                if q_models and calibrator and 0.90 in q_models:
+                    preds_q90 = q_models[0.90].predict(X)
+                    if 0.50 in q_models:
+                        preds_q90 = np.maximum(preds_q90, q_models[0.50].predict(X))
+                    df['move_prob'] = calibrator.transform(preds_q90)
+                    df['pred_spike_pct'] = preds_q90
         except Exception:
             pass  # Fall back gracefully to pure rule-based dip detection
 
-    # 4. Classify Market States
-    # State A: Local Floor Confirmed (Decent discount + bleed flattened out)
+    # 4. Classify Market States (aligned with verify_buyer_dips.py regimes)
+    # State A: Local Floor Confirmed (Scale-Invariant Deceleration + SMA discount)
     floor_mask = (
-        (df['discount_sma30_pct'] >= min_discount_pct) &
-        (df['price_decay_velocity_3d'] >= -0.25) &  # Decay velocity has stabilized
-        (df['z_score'] <= -1.0)
+        (df['microstructure_regime'] == 'CONFIRMED_LOCAL_BOTTOM') &
+        (df['discount_sma30_pct'] >= min_discount_pct)
     )
 
-    # State B: Urgent Pre-Spike Alert (ML breakout probability >= tau)
+    # State B: Urgent Pre-Spike Alert (Calibrated q_0.90 breakout probability >= tau)
     breakout_mask = (
         (df['move_prob'] >= prob_threshold) &
-        (df['pred_spike_pct'] >= 10.0)
+        (df['pred_spike_pct'] >= MODEL_CONFIG["SPIKE_THRESHOLD_PCT"])
     )
 
-    # State C: Falling Knife (Large drop, but decay is still accelerating downwards)
+    # State C: Falling Knife (Scale-invariant downward acceleration)
     knife_mask = (
-        (df['discount_sma30_pct'] >= 12.0) &
-        (df['price_decay_velocity_3d'] < -0.50) &
+        (df['microstructure_regime'] == 'FALLING_KNIFE') &
         (~breakout_mask)
     )
 

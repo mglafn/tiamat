@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import { AlertTriangle, Sliders } from 'lucide-react'
 import { useForecast, useSummary } from '@/lib/hooks'
+import { FEE_CONSTANTS } from '@/lib/constants'
 import { runEconomics, type EconInputs, type WaterfallStep } from '@/lib/economics'
 import { usd, pct, signedUsd, shortUuid } from '@/lib/format'
 
@@ -14,12 +15,12 @@ interface TelemetryPanelProps {
 
 export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPanelProps) {
   const { data: summary } = useSummary(uuid)
-  const { data: forecast } = useForecast(uuid, 'tcgplayer', selectedFinish)
+  const { data: forecast } = useForecast(uuid, selectedFinish)
 
-  const [pro, setPro] = useState(true)
-  const [hurdle, setHurdle] = useState(10)
+  const [pro, setPro] = useState(false)
+  const [hurdle, setHurdle] = useState(8)
   const [taxRate, setTaxRate] = useState(7.5)
-  const [freight, setFreight] = useState(0.09)
+  const [freight, setFreight] = useState(0.0)
   const [kappa, setKappa] = useState(98.5)
   const [activeTab, setActiveTab] = useState<'waterfall' | 'sensitivity'>('waterfall')
 
@@ -41,9 +42,14 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPan
     return runEconomics(inputs)
   }, [forecast, pro, taxRate, freight, kappa, hurdle])
 
+  const deadZoneMax = pro
+    ? FEE_CONSTANTS.DIRECT_DEAD_ZONE_MAX_PRO
+    : FEE_CONSTANTS.DIRECT_DEAD_ZONE_MAX
   const isDeadZone =
     forecast?.is_dead_zone_clamped ||
-    (econ && econ.exitPrice >= 2.5 && econ.exitPrice <= 2.67)
+    (econ &&
+      econ.exitPrice >= FEE_CONSTANTS.DIRECT_DEAD_ZONE_MIN &&
+      econ.exitPrice <= deadZoneMax)
 
   // 2D Sensitivity Heatmap Matrix generator
   const sensitivityMatrix = useMemo(() => {
@@ -201,7 +207,9 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPan
                   <div className="mx-3 mt-3 rounded-sm border border-warn/40 bg-warn/10 p-2.5 font-mono text-[10px] text-warn">
                     <div className="flex items-center gap-1.5 font-bold uppercase">
                       <AlertTriangle className="h-3.5 w-3.5" />
-                      <span>[$2.50, $2.67] Dead-Zone Cliff Triggered</span>
+                      <span>
+                        [${FEE_CONSTANTS.DIRECT_DEAD_ZONE_MIN.toFixed(2)}, ${deadZoneMax.toFixed(2)}] Dead-Zone Cliff Triggered
+                      </span>
                     </div>
                     <p className="mt-1 text-[9.5px] leading-relaxed text-dim">
                       Target exit price intersects the fixed $1.12 step-up commission cliff. Payout clamped to $2.49 to eliminate severe marginal drag.
@@ -275,21 +283,21 @@ export function TelemetryPanel({ uuid, selectedFinish = 'normal' }: TelemetryPan
                     <div className="flex overflow-hidden rounded-sm border border-border text-[10px]">
                       <button
                         type="button"
-                        onClick={() => setPro(true)}
-                        className={`px-2 py-0.5 transition-colors ${
-                          pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'
-                        }`}
-                      >
-                        PRO (8.95%)
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => setPro(false)}
                         className={`px-2 py-0.5 transition-colors ${
                           !pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'
                         }`}
                       >
-                        NON-PRO (10.75%)
+                        DIRECT (8.95%)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPro(true)}
+                        className={`px-2 py-0.5 transition-colors ${
+                          pro ? 'bg-accent font-semibold text-accent-foreground' : 'text-dim hover:text-muted-foreground'
+                        }`}
+                      >
+                        DIRECT PRO (+2.5%)
                       </button>
                     </div>
                   </div>

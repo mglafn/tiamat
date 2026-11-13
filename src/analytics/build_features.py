@@ -6,7 +6,6 @@ Derives scale-invariant price derivatives, robust volatility, and regime states
 using parameters defined in src.config.
 """
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -17,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config import DB_PATH, MICROSTRUCTURE_CONFIG
+from src.config import DB_PATH, MICROSTRUCTURE_CONFIG, FEE_CONFIG
 
 try:
     from rich.console import Console
@@ -67,7 +66,8 @@ def build_analytical_features(db_path: Path = DB_PATH):
     })
     
     cfg = MICROSTRUCTURE_CONFIG
-    
+    fee = FEE_CONFIG
+
     try:
         if HAS_RICH: 
             console.print("[bold cyan][1/3] Building `fact_card_features` (Scale-Invariant Derivatives)...[/bold cyan]")
@@ -86,7 +86,7 @@ def build_analytical_features(db_path: Path = DB_PATH):
                     MAX(CASE WHEN list_type = 'buylist' THEN price END) AS market_buylist,
                     COUNT(CASE WHEN list_type = 'retail' THEN 1 END) AS active_vendors
                 FROM fact_prices
-                WHERE format = 'paper'
+                WHERE format = 'paper' AND vendor != 'cardmarket'
                 GROUP BY uuid, finish, price_date
                 HAVING MIN(CASE WHEN list_type = 'retail' THEN price END) IS NOT NULL
             ),
@@ -98,7 +98,9 @@ def build_analytical_features(db_path: Path = DB_PATH):
                     LN(GREATEST(0.01, market_retail)) - LN(GREATEST(0.01, LAG(market_retail, 1) OVER w_card)) AS log_ret_1d,
                     LN(GREATEST(0.01, market_retail)) - LN(GREATEST(0.01, LAG(market_retail, 3) OVER w_card)) AS log_ret_3d,
                     LAG(market_retail, 3) OVER w_card AS price_t_minus_3,
-                    LAG(market_retail, 6) OVER w_card AS price_t_minus_6
+                    LAG(price_date, 3) OVER w_card AS date_t_minus_3,
+                    LAG(market_retail, 6) OVER w_card AS price_t_minus_6,
+                    LAG(price_date, 6) OVER w_card AS date_t_minus_6
                 FROM daily_market
                 WINDOW w_card AS (PARTITION BY uuid, finish ORDER BY price_date ASC)
             ),
@@ -125,8 +127,8 @@ def build_analytical_features(db_path: Path = DB_PATH):
                     ), price_date), 1)), 0.0) AS daily_return_pct
                 FROM daily_log_diffs
                 WINDOW w_14d AS (
-                    PARTITION BY uuid, finish ORDER BY price_date ASC 
-                    ROWS BETWEEN 13 PRECEDING AND CURRENT ROW
+                    PARTITION BY uuid, finish ORDER BY price_date ASC
+                    RANGE BETWEEN INTERVAL 13 DAYS PRECEDING AND CURRENT ROW
                 )
             ),
             enriched_market AS (
@@ -134,10 +136,17 @@ def build_analytical_features(db_path: Path = DB_PATH):
                     *,
                     -- STRUCTURAL VOLATILITY FLOOR: Scale by MAD or minimum discrete tick size ($0.01 / price)
                     GREATEST(1.4826 * COALESCE(mad_ret_1d, 0.0), {cfg['MIN_TICK_USD']} / GREATEST(0.01, current_price)) AS robust_vol_14d,
-                    -- Discrete Price Velocity & Acceleration
-                    (COALESCE(log_ret_3d, 0.0)) / 3.0 AS velocity_3d,
-                    (LN(GREATEST(0.01, current_price)) - 2.0 * LN(GREATEST(0.01, COALESCE(price_t_minus_3, current_price))) + 
-                     LN(GREATEST(0.01, COALESCE(price_t_minus_6, current_price)))) / 9.0 AS accel_3d,
+                    GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_3, price_date), 3)) AS dt_3d,
+                    GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_6, date_t_minus_3), 3)) AS dt_3d_prev,
+                    COALESCE(log_ret_3d, 0.0) / GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_3, price_date), 3)) AS velocity_3d,
+                    CASE
+                        WHEN price_t_minus_3 IS NOT NULL AND price_t_minus_6 IS NOT NULL THEN
+                            (
+                                ((LN(GREATEST(0.01, current_price)) - LN(GREATEST(0.01, price_t_minus_3))) / GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_3, price_date), 3)))
+                                - ((LN(GREATEST(0.01, price_t_minus_3)) - LN(GREATEST(0.01, price_t_minus_6))) / GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_6, date_t_minus_3), 3)))
+                            ) / (0.5 * (GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_3, price_date), 3)) + GREATEST(1.0, COALESCE(DATE_DIFF('day', date_t_minus_6, date_t_minus_3), 3))))
+                        ELSE 0.0
+                    END AS accel_3d,
                     COALESCE((current_price - market_buylist) / NULLIF(current_price, 0), 1.0) AS bid_ask_spread_pct
                 FROM rolling_dispersion
             )
@@ -159,7 +168,8 @@ def build_analytical_features(db_path: Path = DB_PATH):
                     PARTITION BY e.uuid, e.finish ORDER BY e.price_date ASC
                     RANGE BETWEEN INTERVAL 7 DAYS PRECEDING AND CURRENT ROW
                 )) AS vendor_delta_7d,
-                COALESCE(((e.current_price - e.price_t_minus_3) / NULLIF(e.price_t_minus_3, 0) / 3.0) * 100.0, 0.0) AS price_decay_velocity_3d,
+                COALESCE(((e.current_price - e.price_t_minus_3) / NULLIF(e.price_t_minus_3, 0) / e.dt_3d) * 100.0, 0.0) AS price_decay_velocity_3d,
+                -- PLACEHOLDER: Uses active_vendors (feed count) as a volume proxy pending unit sales data
                 AVG(ABS(e.daily_return_pct) / NULLIF(e.current_price * e.active_vendors, 0)) OVER (
                     PARTITION BY e.uuid, e.finish ORDER BY e.price_date ASC
                     RANGE BETWEEN INTERVAL 29 DAYS PRECEDING AND CURRENT ROW
@@ -167,16 +177,18 @@ def build_analytical_features(db_path: Path = DB_PATH):
                 
                 -- Downside Z-Score with tick-size bound protection
                 e.robust_vol_14d,
-                (COALESCE(e.log_ret_3d, 0.0) - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(3.0)) AS z_downside_3d,
+                (COALESCE(e.log_ret_3d, 0.0) - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(e.dt_3d)) AS z_downside_3d,
                 e.accel_3d / (ABS(e.velocity_3d) + 1e-6) AS exhaustion_ratio,
                 
                 -- Dynamic Regime Classification from Central Configuration
                 CASE 
-                    WHEN ((COALESCE(e.log_ret_3d, 0.0) - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(3.0))) < {cfg['KNIFE_Z_SCORE_THRESH']} AND e.velocity_3d < 0 AND e.accel_3d < 0 
+                    WHEN e.log_ret_3d IS NULL
+                        THEN 'INSUFFICIENT_HISTORY'
+                    WHEN ((e.log_ret_3d - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(e.dt_3d))) < {cfg['KNIFE_Z_SCORE_THRESH']} AND e.velocity_3d < 0 AND e.accel_3d < 0 
                         THEN 'FALLING_KNIFE'
-                    WHEN ((COALESCE(e.log_ret_3d, 0.0) - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(3.0))) < {cfg['BOTTOM_Z_SCORE_THRESH']} AND e.velocity_3d < 0 AND e.accel_3d > 0 AND (e.accel_3d / (ABS(e.velocity_3d) + 1e-6)) >= {cfg['MIN_EXHAUSTION_RATIO']}
+                    WHEN ((e.log_ret_3d - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(e.dt_3d))) < {cfg['BOTTOM_Z_SCORE_THRESH']} AND e.velocity_3d < 0 AND e.accel_3d > 0 AND (e.accel_3d / (ABS(e.velocity_3d) + 1e-6)) >= {cfg['MIN_EXHAUSTION_RATIO']}
                         THEN 'CONFIRMED_LOCAL_BOTTOM'
-                    WHEN ABS((COALESCE(e.log_ret_3d, 0.0) - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(3.0))) <= {cfg['NOISE_Z_SCORE_BOUND']}
+                    WHEN ABS((e.log_ret_3d - COALESCE(e.median_ret_3d, 0.0)) / (e.robust_vol_14d * SQRT(e.dt_3d))) <= {cfg['NOISE_Z_SCORE_BOUND']}
                         THEN 'NOISE_BOUND'
                     ELSE 'TRANSITIONAL'
                 END AS microstructure_regime,
@@ -231,7 +243,7 @@ def build_analytical_features(db_path: Path = DB_PATH):
             print("[3/3] Building `fact_arbitrage_opportunities`...")
 
         conn.execute("DROP TABLE IF EXISTS fact_arbitrage_opportunities")
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE fact_arbitrage_opportunities AS
             WITH tcg_prices AS (
                 SELECT uuid, finish, price_date, MIN(price) AS tcg_price
@@ -250,8 +262,15 @@ def build_analytical_features(db_path: Path = DB_PATH):
             ),
             asof_aligned AS (
                 SELECT c.uuid, c.finish, c.ck_date AS price_date, t.tcg_price, c.ck_price,
-                    (t.tcg_price * 1.075 + CASE WHEN t.tcg_price < 5.00 THEN 0.99 ELSE 0.15 END + 0.09) AS total_acquisition_basis,
-                    (c.ck_price * 1.30) AS ck_store_credit_payout
+                    (
+                        t.tcg_price * {1.0 + fee['DEFAULT_TAX_RATE']}
+                        + CASE
+                            WHEN t.tcg_price < {fee['INBOUND_POSTAGE_THRESHOLD_USD']} THEN {fee['INBOUND_POSTAGE_LOW_USD']}
+                            ELSE {fee['INBOUND_POSTAGE_HIGH_USD']}
+                          END
+                        + {fee['OUTBOUND_BATCH_FREIGHT_USD']}
+                    ) AS total_acquisition_basis,
+                    (c.ck_price * {fee['STORE_CREDIT_MULTIPLIER']}) AS ck_store_credit_payout
                 FROM latest_ck_offers c
                 ASOF JOIN tcg_prices t ON c.uuid = t.uuid AND c.finish = t.finish AND c.ck_date >= t.price_date
                 WHERE t.tcg_price IS NOT NULL AND DATE_DIFF('day', t.price_date, c.ck_date) <= 3

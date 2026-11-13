@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 import datetime
@@ -7,6 +6,8 @@ import subprocess
 from pathlib import Path
 import duckdb
 import joblib
+
+from src.config import DB_PATH, MODEL_PATH, MODEL_CONFIG
 
 try:
     from rich.console import Console
@@ -22,8 +23,6 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 RAW_JSON_PATH = BASE_DIR / "data" / "raw" / "AllPrices.json"
 RAW_CARDS_CSV_PATH = BASE_DIR / "data" / "raw" / "cards.csv"
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
 def log_step(title: str, step_num: str = ""):
     if HAS_RICH:
@@ -144,15 +143,16 @@ def check_step_d() -> bool:
         return False
     try:
         artifact = joblib.load(MODEL_PATH)
-        if ("classifier" not in artifact and "model" not in artifact) or "metrics" not in artifact:
+        if "quantile_models" not in artifact or "metrics" not in artifact:
             log_status("Model artifact schema", False, "Invalid artifact structure")
             return False
         metrics = artifact["metrics"]
-        mae = metrics.get("mae_pct", metrics.get("mae", 0.0))
-        tau = metrics.get("prob_threshold", None)
-        acc = metrics.get("directional_accuracy_pct", None)
-        edge_msg = f"MAE: {mae:.2f}% | tau: {tau} | DirAcc: {acc}%" if tau else f"MAE: {mae:.2f}%"
-        log_status("Model artifact integrity", True, edge_msg)
+        mae = metrics.get("mae_pct", 0.0)
+        tau = metrics.get("tau_buyer_radar", metrics.get("prob_threshold", None))
+        parts = [f"MAE: {mae:.2f}%"]
+        if tau is not None:
+            parts.append(f"tau_buyer: {tau:.3f}")
+        log_status("Model artifact integrity", True, " | ".join(parts))
         return True
     except Exception as e:
         log_status("Model artifact load", False, str(e))
@@ -217,7 +217,7 @@ def main():
     parser.add_argument("--train-only", action="store_true", help="Only run model training")
     parser.add_argument("--backtest", "-b", action="store_true", help="Run backtest after training")
     parser.add_argument("--backtest-only", action="store_true", help="Only run the backtest engine")
-    parser.add_argument("--hurdle", type=float, default=10.0, help="Backtest minimum net ROI %% hurdle (default: 10.0)")
+    parser.add_argument("--hurdle", type=float, default=MODEL_CONFIG["DEFAULT_ROI_HURDLE_PCT"], help="Backtest minimum net ROI %% hurdle")
     parser.add_argument("--skip-freshness", action="store_true", help="Allow stale data older than 3 days")
     args = parser.parse_args()
 

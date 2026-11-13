@@ -1,13 +1,17 @@
-import os
 import sys
 import argparse
 from pathlib import Path
-from decimal import Decimal, ROUND_HALF_EVEN
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
-from sklearn.ensemble import GradientBoostingRegressor
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.config import DB_PATH, MODEL_PATH, FEATURE_COLS, MODEL_CONFIG, FEE_CONFIG
+from src.pricing.fees import calculate_direct_payout_series, landed_basis_series
 from src.analytics.condition import evaluate_condition_haircut
 from src.analytics.sizing import calculate_position_size
 
@@ -22,60 +26,10 @@ try:
 except ImportError:
     HAS_RICH = False
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
-
-
-def calculate_direct_payout_series(
-    prices: pd.Series,
-    tax_rate: float = 0.075,
-    clamp_dead_zone: bool = True,
-    is_pro: bool = False
-) -> pd.Series:
-    p = prices.copy().astype(float)
-    if clamp_dead_zone:
-        p = np.where((p >= 2.50) & (p <= 2.67), 2.49, p)
-    sub_tier_fee = np.round(p * 0.50, 2)
-    sub_tier_payout = p - sub_tier_fee
-    commission = np.minimum(p * 0.0895, 75.00)
-    pro_fee = np.minimum(p * 0.025, 75.00) if is_pro else 0.0
-    gross_total = p * (1.0 + tax_rate)
-    processing = gross_total * 0.025
-    standard_fee = np.round(1.12 + commission + pro_fee + processing, 2)
-    standard_payout = p - standard_fee
-    payout = np.where(
-        p < 0.40,
-        0.0,
-        np.where(p < 2.50, sub_tier_payout, standard_payout)
-    )
-    return np.maximum(0.0, payout)
-
-
-def compute_uncertainty_kelly_units(
-    expected_roi_pct: pd.Series,
-    cqr_lpb: pd.Series,
-    basis: pd.Series,
-    amihud: pd.Series,
-    portfolio_value: float = 10000.0,
-    max_position_dollars: float = 50.0,
-    kappa_kelly: float = 0.25
-) -> pd.Series:
-    est_downside = np.maximum(0.05, (expected_roi_pct - cqr_lpb) / 100.0)
-    est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    f_kelly = kappa_kelly * (est_upside / np.square(est_downside))
-    f_kelly = np.clip(f_kelly, 0.0, 0.05)
-    dollar_kelly = f_kelly * portfolio_value
-    amihud_dollar_cap = 0.02 / np.maximum(amihud, 1e-5)
-    final_dollar_size = np.minimum(
-        dollar_kelly,
-        np.minimum(max_position_dollars, amihud_dollar_cap)
-    )
-    units = np.floor(final_dollar_size / np.maximum(basis, 0.01))
-    return np.maximum(1.0, units)
 
 def render_market_scan_report(payload: dict):
+
     meta = payload["meta"]
     funnel = payload["funnel"]
     spatial_arbs = payload["spatial_arbitrage"]
@@ -121,10 +75,10 @@ def render_market_scan_report(payload: dict):
     tot = meta['scanned_universe']
     descriptions = {
         "Total Scanned Active SKUs": "Unfiltered live active catalog records",
-        "Stage 1 Spike Mover (τ)": f"Upward right-tail breakout probability (P >= {meta.get('prob_threshold', 0.90):.2f})",
-        "CQR LPB Floor Passed (≥ -15%)": "Distribution-free conformal lower prediction bound >= -15%",
-        "Set Decay Filter Passed (≥ -0.5%/d)": "Price decay derivative >= -0.50%/day (Knife Filter)",
-        "Net ROI Hurdle Cleared": f"Expected net ROI >= {meta.get('min_net_roi_pct', 8.0):.1f}%"
+        "Stage 1 Spike Mover (τ)": f"Upward right-tail breakout probability (P >= {meta.get('prob_threshold', 0.40):.2f})",
+        "q10 Downside Floor Passed": f"10th percentile return floor >= {MODEL_CONFIG['Q10_FLOOR_PCT']:.1f}%",
+        "Set Decay Filter Passed": f"Price decay derivative >= {MODEL_CONFIG['DECAY_VELOCITY_FLOOR_PCT']:.2f}%/day (Knife Filter)",
+        "Net ROI Hurdle Cleared": f"Expected net ROI >= {meta.get('min_net_roi_pct', MODEL_CONFIG['DEFAULT_ROI_HURDLE_PCT']):.1f}%"
     }
     for stage, count in funnel.items():
         pct = f"{(count / tot) * 100:.3f}%" if tot > 0 else "0%"
@@ -253,15 +207,14 @@ def scan_live_market(
     artifact = joblib.load(model_path)
     q_models = artifact.get("quantile_models", {})
     calibrator = artifact.get("isotonic_calibrator")
-    classifier = artifact.get("classifier")
-    regressor = artifact.get("regressor")
-    cqr_generator = artifact.get("cqr_generator")
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})
-    prob_threshold = tau if tau is not None else metrics.get("prob_threshold", 0.90)
-    
+    # PLACEHOLDER: Uses calibrated buyer spike threshold pending dedicated Flipper entry rule
+    prob_threshold = tau if tau is not None else metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
+
     conn = duckdb.connect(str(db_path), read_only=True)
     
+    fee = FEE_CONFIG
     spatial_query = f"""
         SELECT
             f.uuid,
@@ -271,8 +224,15 @@ def scan_live_market(
             f.price_date,
             f.tcg_price,
             f.ck_price,
-            (f.tcg_price * 1.075 + CASE WHEN f.tcg_price < 5.00 THEN 0.99 ELSE 0.15 END + 0.09) AS total_acquisition_basis,
-            (f.ck_price * 1.30) AS ck_store_credit_payout,
+            (
+                f.tcg_price * {1.0 + fee['DEFAULT_TAX_RATE']}
+                + CASE
+                    WHEN f.tcg_price < {fee['INBOUND_POSTAGE_THRESHOLD_USD']} THEN {fee['INBOUND_POSTAGE_LOW_USD']}
+                    ELSE {fee['INBOUND_POSTAGE_HIGH_USD']}
+                  END
+                + {fee['OUTBOUND_BATCH_FREIGHT_USD']}
+            ) AS total_acquisition_basis,
+            (f.ck_price * {fee['STORE_CREDIT_MULTIPLIER']}) AS ck_store_credit_payout,
             f.price_spread,
             f.spread_pct
         FROM fact_arbitrage_opportunities f
@@ -283,15 +243,12 @@ def scan_live_market(
     """
     spatial_df = conn.execute(spatial_query).fetchdf()
     
-    features_query = """
+    feature_select_sql = ", ".join([f"f.{col}" for col in FEATURE_COLS])
+    features_query = f"""
         WITH latest_features AS (
             SELECT
                 f.uuid, f.finish, f.price_date, f.current_price,
-                f.sma_ratio, f.volatility_14d, f.daily_return_pct, f.velocity_7d_pct,
-                f.bid_ask_spread_pct, f.spread_velocity_7d, f.vendor_delta_7d,
-                f.price_decay_velocity_3d, f.amihud_illiquidity_30d,
-                f.is_foil, f.is_reserved, f.mana_value, f.popularity_score,
-                f.is_land, f.is_creature, f.asset_age_years, f.rarity_score,
+                {feature_select_sql},
                 COALESCE(d.name, f.uuid) AS name,
                 COALESCE(d.set_code, 'OTC') AS set_code
             FROM fact_card_features f
@@ -309,23 +266,19 @@ def scan_live_market(
         return {"status": "empty", "message": "No active market records found"} if as_dict else None
         
     X_live = market_df[feature_cols].fillna(0.0)
-    if q_models and calibrator and 0.90 in q_models:
-        preds_q90 = q_models[0.90].predict(X_live)
+    if q_models and calibrator and all(q in q_models for q in (0.10, 0.50, 0.90)):
+        preds_q50 = q_models[0.50].predict(X_live)
+        preds_q90 = np.maximum(q_models[0.90].predict(X_live), preds_q50)
+        preds_q10 = np.minimum(q_models[0.10].predict(X_live), preds_q50)
         market_df['move_prob'] = calibrator.transform(preds_q90)
-        market_df['pred_magnitude'] = q_models[0.50].predict(X_live)
-        market_df['cqr_lpb'] = q_models[0.10].predict(X_live)
-    elif classifier and regressor:
-        market_df['move_prob'] = classifier.predict_proba(X_live)[:, 1]
-        market_df['pred_magnitude'] = regressor.predict(X_live)
-        market_df['cqr_lpb'] = market_df['pred_magnitude'] - 10.0
+        market_df['pred_magnitude'] = preds_q50
+        market_df['cqr_lpb'] = preds_q10
     else:
         market_df['move_prob'] = 0.0
         market_df['pred_magnitude'] = 0.0
-        market_df['cqr_lpb'] = -10.0
-        
-    inbound_postage = np.where(market_df['current_price'] < 5.00, 0.99, 0.15)
-    hub_freight = 0.012
-    market_df['basis'] = (market_df['current_price'] * 1.075) + inbound_postage + hub_freight
+        market_df['cqr_lpb'] = MODEL_CONFIG["Q10_FLOOR_PCT"]
+
+    market_df['basis'] = landed_basis_series(market_df['current_price'], channel="direct")
     market_df['exp_exit'] = np.maximum(0.01, market_df['current_price'] * (1.0 + market_df['pred_magnitude'] / 100.0))
     
     payout_win_raw = calculate_direct_payout_series(market_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
@@ -333,13 +286,7 @@ def scan_live_market(
     market_df['exp_exit_payout'] = payout_win_raw * kappa_win
     market_df['profit_win'] = market_df['exp_exit_payout'] - market_df['basis']
 
-    fail_price = market_df['current_price'] * 0.90
-    payout_fail_raw = calculate_direct_payout_series(fail_price, clamp_dead_zone=True, is_pro=is_pro)
-    kappa_fail = evaluate_condition_haircut(fail_price)
-    market_df['profit_fail'] = (payout_fail_raw * kappa_fail) - market_df['basis']
-
-    p = market_df['move_prob']
-    market_df['exp_net_profit'] = (p * market_df['profit_win']) + ((1.0 - p) * market_df['profit_fail'])
+    market_df['exp_net_profit'] = market_df['profit_win']
     market_df['exp_net_roi_pct'] = (market_df['exp_net_profit'] / market_df['basis']) * 100.0
 
     # Position sizing:
@@ -352,18 +299,21 @@ def scan_live_market(
         )
     else:
         market_df['allocated_units'] = 1.0
-        
+
+    q10_floor = MODEL_CONFIG["Q10_FLOOR_PCT"]
+    decay_floor = MODEL_CONFIG["DECAY_VELOCITY_FLOOR_PCT"]
     stage1_mask = (market_df['move_prob'] >= prob_threshold) & (market_df['pred_magnitude'] > 0.0)
-    cqr_mask = market_df['cqr_lpb'] >= -15.0
-    decay_mask = market_df['price_decay_velocity_3d'] >= -0.5
+    cqr_mask = market_df['cqr_lpb'] >= q10_floor
+    decay_mask = market_df['price_decay_velocity_3d'] >= decay_floor
     roi_mask = market_df['exp_net_roi_pct'] >= min_net_roi_pct
-    active_mask = stage1_mask & cqr_mask & decay_mask & roi_mask
+    sized_mask = market_df['allocated_units'] > 0
+    active_mask = stage1_mask & cqr_mask & decay_mask & roi_mask & sized_mask
     
     funnel_counts = {
         "Total Scanned Active SKUs": len(market_df),
         "Stage 1 Spike Mover (τ)": int(stage1_mask.sum()),
-        "CQR LPB Floor Passed (≥ -15%)": int((stage1_mask & cqr_mask).sum()),
-        "Set Decay Filter Passed (≥ -0.5%/d)": int((stage1_mask & cqr_mask & decay_mask).sum()),
+        "q10 Downside Floor Passed": int((stage1_mask & cqr_mask).sum()),
+        "Set Decay Filter Passed": int((stage1_mask & cqr_mask & decay_mask).sum()),
         "Net ROI Hurdle Cleared": int(active_mask.sum())
     }
     
@@ -372,12 +322,14 @@ def scan_live_market(
     vetoed_df = market_df[trap_mask].copy().sort_values(by="pred_magnitude", ascending=False).head(top_n_records)
     
     def resolve_veto_reason(row):
-        if row['cqr_lpb'] < -15.0:
-            return f"CQR Floor Breach ({row['cqr_lpb']:.1f}% < -15.0%)"
-        if row['price_decay_velocity_3d'] < -0.5:
+        if row['cqr_lpb'] < q10_floor:
+            return f"Downside Floor Breach ({row['cqr_lpb']:.1f}% < {q10_floor:.1f}%)"
+        if row['price_decay_velocity_3d'] < decay_floor:
             return f"Active Falling Knife ({row['price_decay_velocity_3d']:.2f}%/d)"
         if row['exp_net_roi_pct'] < min_net_roi_pct:
             return f"Sub-Hurdle E[ROI] ({row['exp_net_roi_pct']:.1f}% < {min_net_roi_pct:.1f}%)"
+        if row['allocated_units'] <= 0:
+            return "Exceeds Position Dollar Ceiling"
         return "Microstructural Drag"
         
     if len(vetoed_df) > 0:

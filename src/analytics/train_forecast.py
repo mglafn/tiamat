@@ -6,13 +6,12 @@ Simultaneously estimates 10th, 50th, and 90th conditional quantiles with
 Isotonic F2.0 calibration for the Buyer Radar, configured via src.config.
 """
 
-import os
 import sys
 import time
 from pathlib import Path
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, precision_recall_curve
@@ -23,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config import DB_PATH, MODEL_PATH, MODELS_DIR, MODEL_CONFIG, FEATURE_COLS
+from src.config import DB_PATH, MODEL_PATH, MODEL_CONFIG, FEATURE_COLS
 
 try:
     from rich.console import Console
@@ -135,6 +134,13 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
     X_val, y_val = X.loc[val_mask], y.loc[val_mask]
     X_test, y_test = X.loc[test_mask], y.loc[test_mask]
 
+    if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
+        raise ValueError(
+            f"Insufficient temporal span ({total_days}d) for 2x{cfg['EMBARGO_DAYS']}d embargoes "
+            f"(Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}). "
+            "Run training on the unpruned DuckDB before prune_db.py."
+        )
+
     if HAS_RICH:
         console.print(f"[bold white]Partition Breakdown:[/bold white] Train: [cyan]{len(X_train):,}[/cyan] | Val: [yellow]{len(X_val):,}[/yellow] | Test: [green]{len(X_test):,}[/green] ({cfg['EMBARGO_DAYS']}D Embargo Protected)\n")
 
@@ -150,7 +156,7 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
             console=console,
             transient=False
         ) as progress:
-            task = progress.add_task("[cyan]Training Quantile Models...", total=5)
+            task = progress.add_task("[cyan]Training Quantile Models...", total=len(cfg["QUANTILES"]) + 2)
             
             for q in cfg['QUANTILES']:
                 progress.update(task, description=f"[bold cyan]Training Quantile Regressor q={q:.2f}...")
@@ -171,7 +177,8 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
                 progress.advance(task)
                 
             progress.update(task, description=f"[bold cyan]Calibrating Buyer Radar (q_0.90 -> P(Spike >= {cfg['SPIKE_THRESHOLD_PCT']}%))...")
-            val_preds_q90 = quantile_models[0.90].predict(X_val)
+            val_preds_q50 = quantile_models[0.50].predict(X_val)
+            val_preds_q90 = np.maximum(quantile_models[0.90].predict(X_val), val_preds_q50)
             y_val_binary = (y_val >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
             
             isotonic_calibrator = IsotonicRegression(out_of_bounds="clip")
@@ -209,7 +216,8 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
             model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
             quantile_models[q] = model
             
-        val_preds_q90 = quantile_models[0.90].predict(X_val)
+        val_preds_q50 = quantile_models[0.50].predict(X_val)
+        val_preds_q90 = np.maximum(quantile_models[0.90].predict(X_val), val_preds_q50)
         y_val_binary = (y_val >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
         
         isotonic_calibrator = IsotonicRegression(out_of_bounds="clip")
@@ -235,7 +243,7 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
     test_q50_mae = mean_absolute_error(y_test, test_q50)
     test_calibrated_probs = isotonic_calibrator.transform(test_q90)
     
-    flipper_signals = test_q10 >= cfg['FLIPPER_FEE_HURDLE_PCT']
+    flipper_signals = (test_q10 >= cfg['Q10_FLOOR_PCT']) & (test_q50 >= cfg['FLIPPER_FEE_HURDLE_PCT'])
     buyer_radar_signals = test_calibrated_probs >= optimal_tau_buyer
     
     y_test_spikes = (y_test >= cfg['SPIKE_THRESHOLD_PCT']).astype(int)
@@ -252,7 +260,7 @@ def train_dual_persona_engine(db_path: Path = DB_PATH, model_output_path: Path =
 
         perf_table.add_row("Median Forecast MAE (q_0.50)", f"{test_q50_mae:.2f}%", "Symmetric, unskewed baseline for both personas")
         perf_table.add_row(f"Buyer Radar Spike Recall (F{cfg['F_BETA_RECALL_WEIGHT']})", f"{buyer_recall:.1f}%", f"Catches breakouts early (Threshold: τ={optimal_tau_buyer:.3f})")
-        perf_table.add_row(f"Flipper High-Conviction Triggers (q_0.10 >= {cfg['FLIPPER_FEE_HURDLE_PCT']}%)", f"{int(flipper_signals.sum()):,} trades", "Conservative capital shield clearing platform fees")
+        perf_table.add_row(f"Flipper Triggers (q_0.50 >= {cfg['FLIPPER_FEE_HURDLE_PCT']}%, q_0.10 >= {cfg['Q10_FLOOR_PCT']}%)", f"{int(flipper_signals.sum()):,} trades", "Median return clears fee hurdle with downside shield")
         perf_table.add_row("Buyer Radar Triggers", f"{int(buyer_radar_signals.sum()):,} alerts", "Actionable heads-up on right-tail momentum")
 
         console.print()

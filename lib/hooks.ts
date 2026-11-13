@@ -25,8 +25,8 @@ export function useHealth() {
 
 export function useArbitrage(minSpread: number, finish: string) {
   const { data, error, isLoading, isValidating, mutate } = useSWR<ArbitrageOpportunity[]>(
-    [`arbitrage-book`, minSpread],
-    () => apiClient.getArbitrage(minSpread),
+    [`arbitrage-book`, minSpread, finish],
+    () => apiClient.getArbitrage(minSpread, finish),
     {
       refreshInterval: 20000,
       revalidateOnFocus: false,
@@ -53,13 +53,12 @@ export function useArbitrage(minSpread: number, finish: string) {
 
 export function useHistory(
   uuid: string | null,
-  vendor: string = "tcgplayer",
   finish: string = "normal",
   days: number = 60
 ) {
   return useSWR<PriceHistoryPoint[]>(
-    uuid ? [`history`, uuid, vendor, finish, days] : null,
-    () => (uuid ? apiClient.getHistory(uuid, vendor, finish, days) : []),
+    uuid ? [`history`, uuid, finish, days] : null,
+    () => (uuid ? apiClient.getHistory(uuid, finish, days) : []),
     {
       revalidateOnFocus: false,
       keepPreviousData: true,
@@ -68,10 +67,10 @@ export function useHistory(
   )
 }
 
-export function useForecast(uuid: string | null, vendor: string, finish: string) {
+export function useForecast(uuid: string | null, finish: string) {
   return useSWR<PredictionResponse | null>(
-    uuid ? [`forecast`, uuid, vendor, finish] : null,
-    () => (uuid ? apiClient.getForecast(uuid, vendor, finish) : null),
+    uuid ? [`forecast`, uuid, finish] : null,
+    () => (uuid ? apiClient.getForecast(uuid, finish) : null),
     {
       revalidateOnFocus: false,
       keepPreviousData: false,

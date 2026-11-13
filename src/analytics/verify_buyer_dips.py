@@ -1,17 +1,17 @@
 """
 src/analytics/verify_buyer_dips.py
 -----------------------------------
-Combinatorial Purged Cross-Validation (CPCV) Evaluator for Generalist Buyers.
-Evaluates scale-invariant floor detection, true falling knives, and buyer alpha
-using tolerances and parameters configured in src.config.
+Holdout & Microstructure Regime Evaluator for Generalist Buyers.
+PLACEHOLDER: Evaluates static holdout predictions and SQL regime slices
+(does not retrain quantile models across CPCV folds).
 """
 
 import sys
 import itertools
 from pathlib import Path
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
 
 # Ensure repository root is on sys.path for direct script execution
@@ -19,13 +19,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config import DB_PATH, MODEL_PATH, EVAL_CONFIG, FEATURE_COLS
+from src.config import DB_PATH, MODEL_PATH, EVAL_CONFIG, MODEL_CONFIG, FEATURE_COLS
 
 try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
-    from rich.text import Text
     from rich import box
     HAS_RICH = True
     console = Console()
@@ -85,8 +84,7 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     query = f"""
         SELECT
             t.uuid, t.finish, t.price_date, t.current_price, t.target_return_7d_pct,
-            f.sma_30, f.z_downside_3d, f.velocity_3d, f.accel_3d, f.exhaustion_ratio,
-            f.microstructure_regime,
+            f.sma_30, f.microstructure_regime,
             {feature_select_sql},
             COALESCE(d.name, t.uuid) AS name,
             COALESCE(d.set_code, 'OTC') AS set_code
@@ -116,12 +114,15 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     cfg = EVAL_CONFIG
 
     buyer_radar_available = False
+    oos_cutoff = None
     if model_path.exists():
         try:
             artifact = joblib.load(model_path)
             q_models = artifact.get("quantile_models")
             calibrator = artifact.get("isotonic_calibrator")
             tau_buyer = artifact.get("optimal_tau_buyer", 0.40)
+            split_date = artifact.get("metrics", {}).get("split_date")
+            oos_cutoff = pd.to_datetime(split_date) if split_date else None
 
             if q_models and calibrator and 0.90 in q_models:
                 buyer_radar_available = True
@@ -137,17 +138,24 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     total_floor_entries, floor_held, floor_returns = 0, 0, []
     total_knife_vetoes, knife_bleed, knife_returns = 0, 0, []
     total_radar_alerts, radar_spikes, radar_returns = 0, 0, []
+    seen_dates = set()
 
-    for _, (train_idx, test_idx) in enumerate(splitter.split(df, "price_date")):
+    for _, (_, test_idx) in enumerate(splitter.split(df, "price_date")):
         test_df = df.iloc[test_idx].copy()
         if len(test_df) == 0:
             continue
+
+        # Deduplicate dates across combinations when CPCV_K_TEST > 1
+        test_df = test_df[~test_df['price_date'].isin(seen_dates)]
+        if len(test_df) == 0:
+            continue
+        seen_dates.update(test_df['price_date'].unique())
 
         # Signal 1: Confirmed Floor (Scale-Invariant Deceleration)
         floor_mask = (test_df['microstructure_regime'] == 'CONFIRMED_LOCAL_BOTTOM')
         floors = test_df[floor_mask]
         total_floor_entries += len(floors)
-        floor_held += int((floors['target_return_7d_pct'] >= -1.0).sum())
+        floor_held += int((floors['target_return_7d_pct'] >= cfg['SUPPORT_CUSHION_PCT']).sum())
         floor_returns.extend(floors['target_return_7d_pct'].tolist())
 
         # Signal 2: True Falling Knife (Scale-Invariant Downward Acceleration)
@@ -157,16 +165,19 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
         knife_bleed += int((knives['target_return_7d_pct'] < 0.0).sum())
         knife_returns.extend(knives['target_return_7d_pct'].tolist())
 
-        # Signal 3: Buyer Radar Pre-Spike Breakout (Multi-Quantile Upside)
+        # Signal 3: Buyer Radar Pre-Spike Breakout (strictly OOS >= split_date to prevent training/calib leakage)
         if buyer_radar_available:
-            X_test_sub = test_df[FEATURE_COLS].fillna(0.0)
-            preds_q90 = q_models[0.90].predict(X_test_sub)
-            calibrated_p = calibrator.transform(preds_q90)
-            spike_alerts = test_df[calibrated_p >= tau_buyer]
-            total_radar_alerts += len(spike_alerts)
-            radar_spikes += int((spike_alerts['target_return_7d_pct'] >= cfg['SPIKE_TARGET_PCT']).sum())
-            radar_returns.extend(spike_alerts['target_return_7d_pct'].tolist())
-
+            oos_df = test_df[test_df['price_date'] >= oos_cutoff] if oos_cutoff is not None else test_df
+            if len(oos_df) > 0:
+                X_test_sub = oos_df[FEATURE_COLS].fillna(0.0)
+                preds_q90 = q_models[0.90].predict(X_test_sub)
+                if 0.50 in q_models:
+                    preds_q90 = np.maximum(preds_q90, q_models[0.50].predict(X_test_sub))
+                calibrated_p = calibrator.transform(preds_q90)
+                spike_alerts = oos_df[calibrated_p >= tau_buyer]
+                total_radar_alerts += len(spike_alerts)
+                radar_spikes += int((spike_alerts['target_return_7d_pct'] >= MODEL_CONFIG['SPIKE_THRESHOLD_PCT']).sum())
+                radar_returns.extend(spike_alerts['target_return_7d_pct'].tolist())
     floor_acc = (floor_held / max(1, total_floor_entries)) * 100.0
     floor_avg = np.mean(floor_returns) if floor_returns else 0.0
     knife_acc = (knife_bleed / max(1, total_knife_vetoes)) * 100.0
@@ -175,7 +186,7 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     radar_avg = np.mean(radar_returns) if radar_returns else 0.0
 
     floor_df_all = df[df['microstructure_regime'] == 'CONFIRMED_LOCAL_BOTTOM']
-    buyer_alpha = (1.0 - (floor_df_all['current_price'].sum() / floor_df_all['sma_30'].sum())) * 100.0 if len(floor_df_all) > 0 else 0.0
+    buyer_alpha = (((floor_df_all['sma_30'] - floor_df_all['current_price']) / floor_df_all['sma_30']).mean() * 100.0) if len(floor_df_all) > 0 else 0.0
     dar = (np.array(floor_returns) > cfg['DRAWDOWN_TOLERANCE_PCT']).mean() * 100.0 if floor_returns else 0.0
     fir = (np.array(floor_returns) >= cfg['SUPPORT_CUSHION_PCT']).mean() * 100.0 if floor_returns else 0.0
 
@@ -201,7 +212,7 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     table.add_row(
         "Confirmed Floor Entry",
         f"{total_floor_entries:,}",
-        "Card price held or bounced (Ret >= -1.0%)",
+        f"Card price held or bounced (Ret >= {cfg['SUPPORT_CUSHION_PCT']:.1f}%)",
         f"{floor_acc:.1f}%",
         f"{floor_avg:+.2f}%"
     )
@@ -216,10 +227,11 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
         table.add_row(
             "Buyer Radar Breakout Alert",
             f"{total_radar_alerts:,}",
-            f"Card realized upward spike (Ret >= +{cfg['SPIKE_TARGET_PCT']}%)",
+            f"Card realized upward spike (Ret >= +{MODEL_CONFIG['SPIKE_THRESHOLD_PCT']:.1f}%)",
             f"{radar_acc:.1f}%",
             f"{radar_avg:+.2f}%"
         )
+
 
     score_panel = Table(box=box.ROUNDED, border_style="green", expand=True)
     score_panel.add_column("Buyer Alpha (Savings vs 30D SMA)", justify="center", style="bold green")

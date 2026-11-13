@@ -7,9 +7,12 @@ const nextConfig = {
     unoptimized: true,
   },
   async rewrites() {
-    const apiUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL
+    const apiUrl =
+      process.env.API_URL ||
+      process.env.NEXT_PUBLIC_API_URL ||
+      (process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : "")
     if (!apiUrl) return []
-    
+
     const target = apiUrl.replace(/\/$/, "")
 
     return [

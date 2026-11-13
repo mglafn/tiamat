@@ -2,10 +2,16 @@ import sys
 import argparse
 from pathlib import Path
 import duckdb
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
-from sklearn.ensemble import GradientBoostingRegressor
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.config import DB_PATH, MODEL_PATH, FEATURE_COLS, MODEL_CONFIG, FEE_CONFIG
+from src.pricing.fees import calculate_direct_payout_series, landed_basis_series
 from src.analytics.condition import evaluate_condition_haircut
 from src.analytics.sizing import calculate_position_size
 
@@ -20,60 +26,11 @@ try:
 except ImportError:
     HAS_RICH = False
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-DB_PATH = BASE_DIR / "data" / "mtg_prices.duckdb"
-MODEL_PATH = BASE_DIR / "models" / "xgboost_forecast.joblib"
 
 
-
-def calculate_direct_payout_series(
-    prices: pd.Series,
-    tax_rate: float = 0.075,
-    clamp_dead_zone: bool = True,
-    is_pro: bool = False
-) -> pd.Series:
-    p = prices.copy().astype(float)
-    if clamp_dead_zone:
-        p = np.where((p >= 2.50) & (p <= 2.67), 2.49, p)
-    sub_tier_fee = np.round(p * 0.50, 2)
-    sub_tier_payout = p - sub_tier_fee
-    commission = np.minimum(p * 0.0895, 75.00)
-    pro_fee = np.minimum(p * 0.025, 75.00) if is_pro else 0.0
-    gross_total = p * (1.0 + tax_rate)
-    processing = gross_total * 0.025
-    standard_fee = np.round(1.12 + commission + pro_fee + processing, 2)
-    standard_payout = p - standard_fee
-    payout = np.where(
-        p < 0.40,
-        0.0,
-        np.where(p < 2.50, sub_tier_payout, standard_payout)
-    )
-    return np.maximum(0.0, payout)
-
-
-def compute_uncertainty_kelly_units(
-    expected_roi_pct: pd.Series,
-    cqr_lpb: pd.Series,
-    basis: pd.Series,
-    amihud: pd.Series,
-    portfolio_value: float = 10000.0,
-    max_position_dollars: float = 50.0,
-    kappa_kelly: float = 0.25
-) -> pd.Series:
-    est_downside = np.maximum(0.05, (expected_roi_pct - cqr_lpb) / 100.0)
-    est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    f_kelly = kappa_kelly * (est_upside / np.square(est_downside))
-    f_kelly = np.clip(f_kelly, 0.0, 0.05)
-    dollar_kelly = f_kelly * portfolio_value
-    amihud_dollar_cap = 0.02 / np.maximum(amihud, 1e-5)
-    final_dollar_size = np.minimum(
-        dollar_kelly,
-        np.minimum(max_position_dollars, amihud_dollar_cap)
-    )
-    units = np.floor(final_dollar_size / np.maximum(basis, 0.01))
-    return np.maximum(1.0, units)
-
-def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd.DataFrame:
+def evaluate_dataframe_trades(
+    df: pd.DataFrame, is_pro: bool, sizing: str
+) -> pd.DataFrame:
     required_cols = ['allocated_units', 'actual_future_price', 'realized_exit_payout',
                      'unit_profit', 'net_roi_pct', 'is_win', 'total_cost', 'total_profit']
     if len(df) == 0:
@@ -151,9 +108,9 @@ def render_terminal_scorecard(payload: dict):
         descriptions = {
             "Total Test Candidates": "Unfiltered out-of-time candidate universe",
             "Stage 1 Spike Mover (τ)": "Right-tail upward spike conviction (P >= tau)",
-            "CQR LPB Floor Passed": "Statistical lower prediction bound (LPB >= -5.0%)",
-            "Set Decay Filter Passed": "Dynamic falling knife decay filter (>= -0.5%/day)",
-            "Net ROI Hurdle Cleared": "Expected payout exceeds landed basis + fees"
+            "q10 Downside Floor Passed": f"10th percentile return floor (q10 >= {MODEL_CONFIG['Q10_FLOOR_PCT']:.1f}%)",
+            "Set Decay Filter Passed": f"Dynamic falling knife decay filter (>= {MODEL_CONFIG['DECAY_VELOCITY_FLOOR_PCT']:.1f}%/day)",
+            "Net ROI Hurdle Cleared": "Expected payout exceeds landed basis + fees",
         }
         for stage, count in funnel.items():
             pct = f"{(count / tot) * 100:.3f}%" if tot > 0 else "0%"
@@ -287,27 +244,24 @@ def run_arbitrage_backtest(
     artifact = joblib.load(model_path)
     q_models = artifact.get("quantile_models", {})
     calibrator = artifact.get("isotonic_calibrator")
-    classifier = artifact.get("classifier")
-    regressor = artifact.get("regressor")
-    cqr_generator = artifact.get("cqr_generator")
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})
-    prob_threshold = tau if tau is not None else metrics.get("prob_threshold", 0.90)
+    # PLACEHOLDER: Shares calibrated buyer spike threshold pending dedicated Flipper entry rule
+    prob_threshold = tau if tau is not None else metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
     persisted_split_date = metrics.get("split_date", None)
     
+    feature_select_sql = ", ".join([f"f.{col}" for col in FEATURE_COLS])
     conn = duckdb.connect(str(db_path), read_only=True)
-    query = """
+    query = f"""
         SELECT
             t.uuid, t.finish, t.price_date, t.current_price, t.target_return_7d_pct,
-            t.sma_ratio, t.volatility_14d, t.daily_return_pct, t.velocity_7d_pct,
-            t.bid_ask_spread_pct, t.spread_velocity_7d, t.vendor_delta_7d,
-            t.price_decay_velocity_3d, t.amihud_illiquidity_30d,
-            t.is_foil, t.is_reserved, t.mana_value, t.popularity_score,
-            t.is_land, t.is_creature, t.asset_age_years, t.rarity_score,
+            {feature_select_sql},
             COALESCE(d.name, t.uuid) AS name,
             COALESCE(d.set_code, 'OTC') AS set_code,
             d.collector_number
         FROM fact_training_dataset t
+        JOIN fact_card_features f
+            ON t.uuid = f.uuid AND t.finish = f.finish AND t.price_date = f.price_date
         LEFT JOIN dim_cards d ON t.uuid = d.uuid
         WHERE t.current_price >= 0.40
         ORDER BY t.price_date ASC
@@ -326,60 +280,62 @@ def run_arbitrage_backtest(
         return {"status": "empty", "message": f"No records >= {test_start_date.date()}"} if as_dict else None
         
     X_test = test_df[feature_cols].fillna(0.0)
-    if q_models and calibrator and 0.90 in q_models:
-        preds_q90 = q_models[0.90].predict(X_test)
-        test_df['move_prob'] = calibrator.transform(preds_q90)
-        test_df['pred_magnitude'] = q_models[0.50].predict(X_test)
-        test_df['cqr_lpb'] = q_models[0.10].predict(X_test)
+    if q_models and calibrator and all(q in q_models for q in (0.10, 0.50, 0.90)):
+        q50 = q_models[0.50].predict(X_test)
+        q90 = np.maximum(q_models[0.90].predict(X_test), q50)
+        q10 = np.minimum(q_models[0.10].predict(X_test), q50)
+        test_df['move_prob'] = calibrator.transform(q90)
+        test_df['pred_magnitude'] = q50
+        test_df['cqr_lpb'] = q10
     else:
-        test_df['move_prob'] = classifier.predict_proba(X_test)[:, 1] if classifier else 0.0
-        test_df['pred_magnitude'] = regressor.predict(X_test) if regressor else 0.0
-        test_df['cqr_lpb'] = cqr_generator.predict_lpb(X_test) if cqr_generator else test_df['pred_magnitude'] - 10.0
-        
-    inbound_postage = np.where(test_df['current_price'] < 5.00, 0.99, 0.15)
-    hub_freight = 0.012
-    test_df['basis'] = (test_df['current_price'] * 1.075) + inbound_postage + hub_freight
+        test_df['move_prob'] = 0.0
+        test_df['pred_magnitude'] = 0.0
+        test_df['cqr_lpb'] = MODEL_CONFIG["Q10_FLOOR_PCT"]
+
+    test_df['basis'] = landed_basis_series(test_df['current_price'], channel="direct")
     test_df['exp_exit'] = np.maximum(0.01, test_df['current_price'] * (1.0 + test_df['pred_magnitude'] / 100.0))
-    
+
     payout_win_raw = calculate_direct_payout_series(test_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
     kappa_win = evaluate_condition_haircut(test_df['exp_exit'])
     test_df['payout_win'] = payout_win_raw * kappa_win
     test_df['profit_win'] = test_df['payout_win'] - test_df['basis']
 
-    assumed_fail_price = test_df['current_price'] * 0.90
-    payout_fail_raw = calculate_direct_payout_series(assumed_fail_price, clamp_dead_zone=True, is_pro=is_pro)
-    kappa_fail = evaluate_condition_haircut(assumed_fail_price)
-    test_df['payout_fail'] = payout_fail_raw * kappa_fail
-    
-    p = test_df['move_prob']
-    test_df['exp_net_profit'] = (p * test_df['profit_win']) + ((1.0 - p) * test_df['profit_fail'])
+    test_df['exp_net_profit'] = test_df['profit_win']
     test_df['exp_net_roi_pct'] = (test_df['exp_net_profit'] / test_df['basis']) * 100.0
-    
+
     stage1_mask = (test_df['move_prob'] >= prob_threshold) & (test_df['pred_magnitude'] > 0.0)
-    cqr_safety_mask = test_df['cqr_lpb'] >= -5.0
-    decay_filter = test_df['price_decay_velocity_3d'] >= -0.5
+    cqr_safety_mask = test_df['cqr_lpb'] >= MODEL_CONFIG["Q10_FLOOR_PCT"]
+    decay_filter = test_df['price_decay_velocity_3d'] >= MODEL_CONFIG["DECAY_VELOCITY_FLOOR_PCT"]
     roi_hurdle_mask = test_df['exp_net_roi_pct'] >= min_net_roi_pct
     naive_mask = stage1_mask & (((test_df['profit_win'] / test_df['basis']) * 100.0) >= min_net_roi_pct)
-    active_mask = stage1_mask & cqr_safety_mask & decay_filter & roi_hurdle_mask
-    
+
+    if filter_mode == "exp_roi":
+        active_mask = stage1_mask & roi_hurdle_mask
+    elif filter_mode == "win_roi":
+        active_mask = naive_mask
+    else:
+        active_mask = stage1_mask & cqr_safety_mask & decay_filter & roi_hurdle_mask
+
     funnel_counts = {
         "Total Test Candidates": len(test_df),
         "Stage 1 Spike Mover (τ)": int(stage1_mask.sum()),
-        "CQR LPB Floor Passed": int((stage1_mask & cqr_safety_mask).sum()),
+        "q10 Downside Floor Passed": int((stage1_mask & cqr_safety_mask).sum()),
         "Set Decay Filter Passed": int((stage1_mask & cqr_safety_mask & decay_filter).sum()),
         "Net ROI Hurdle Cleared": int(active_mask.sum())
     }
-    
+
     buy_signals = test_df[active_mask].copy()
     naive_signals = test_df[naive_mask].copy()
-    
+
     if len(buy_signals) > 0:
         buy_signals = buy_signals.sort_values(by="exp_net_roi_pct", ascending=False)
         if top_daily > 0:
-            buy_signals = buy_signals.groupby('price_date', group_keys=False).apply(lambda g: g.head(top_daily)).reset_index(drop=True)
-            
+            buy_signals = buy_signals.groupby('price_date', group_keys=False).head(top_daily).reset_index(drop=True)
+
     buy_signals = evaluate_dataframe_trades(buy_signals, is_pro, sizing)
-    naive_signals = evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat")
+    if sizing == "kelly" and len(buy_signals) > 0:
+        buy_signals = buy_signals[buy_signals['allocated_units'] > 0].reset_index(drop=True)
+    naive_signals = evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat") if show_ablation else naive_signals.iloc[0:0]
     
     total_trades = len(buy_signals)
     win_trades = int(buy_signals['is_win'].sum()) if total_trades > 0 else 0

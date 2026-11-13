@@ -6,6 +6,9 @@ Position sizing and capital allocation policies.
 import numpy as np
 import pandas as pd
 
+from src.config import MODEL_CONFIG
+
+
 def calculate_position_size(
     expected_roi_pct: pd.Series,
     lower_bound_return_pct: pd.Series,
@@ -13,44 +16,22 @@ def calculate_position_size(
     amihud: pd.Series = None,
     portfolio_equity: float = 10000.0,
     max_position_dollars: float = 50.0,
-    max_units_per_asset: int = 4
+    max_units_per_asset: int = 4,
 ) -> pd.Series:
     """
-    Allocates integer units bounded by capital ceilings and downside bounds.
+    Allocates integer units bounded by a fixed per-asset dollar ceiling and unit cap.
     """
-    # Defensive Floor: Veto sizing if lower bound indicates severe negative drift
-    viable_mask = lower_bound_return_pct >= -15.0
-    
-    # Placeholder: Allocates fractional capital capped at max_position_dollars
-    est_downside = np.maximum(0.05, (expected_roi_pct - lower_bound_return_pct) / 100.0)
-    est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    
-    # Quarter-Kelly scaling fraction
-    f_kelly = np.clip(0.25 * (est_upside / np.square(est_downside)), 0.0, 0.05)
-    target_dollars = np.minimum(f_kelly * portfolio_equity, max_position_dollars)
-    
-    raw_units = np.floor(target_dollars / np.maximum(basis, 0.01))
-    bounded_units = np.clip(raw_units, 1.0, float(max_units_per_asset))
-    
-    return np.where(viable_mask, bounded_units, 0.0)    expected_roi_pct: pd.Series,
-    lower_bound_return_pct: pd.Series,
-    basis: pd.Series,
-    amihud: pd.Series = None,
-    portfolio_equity: float = 10000.0,
-    max_position_dollars: float = 50.0
-) -> pd.Series:
-    """
-    Allocates integer units bounded by capital ceiling and downside risk.
-    Replaces arbitrary Amihud heuristics (0.02 / max(amihud, 1e-5)).
-    """
-    # 1. Uncertainty envelope: penalize size when lower bound return is deeply negative
-    est_downside = np.maximum(0.05, (expected_roi_pct - lower_bound_return_pct) / 100.0)
-    est_upside = np.maximum(0.05, expected_roi_pct / 100.0)
-    
-    # 2. Conservative quarter-Kelly fraction capped at 5% of portfolio
-    f_kelly = np.clip(0.25 * (est_upside / np.square(est_downside)), 0.0, 0.05)
-    target_dollars = np.minimum(f_kelly * portfolio_equity, max_position_dollars)
-    
-    # 3. Discrete unit conversion
-    units = np.floor(target_dollars / np.maximum(basis, 0.01))
-    return np.maximum(1.0, units)
+    del amihud, portfolio_equity  # PLACEHOLDER: Unused pending real volume/depth liquidity policy
+
+    viable_mask = (
+        lower_bound_return_pct >= MODEL_CONFIG["Q10_FLOOR_PCT"]
+    ) & (expected_roi_pct > 0.0)
+
+    # PLACEHOLDER: Explicit fixed dollar/unit cap (replaced inert Kelly math)
+    raw_units = np.floor(max_position_dollars / np.maximum(basis, 0.01))
+    bounded_units = np.clip(raw_units, 0.0, float(max_units_per_asset))
+
+    result = np.where(viable_mask, bounded_units, 0.0)
+    if isinstance(expected_roi_pct, pd.Series):
+        return pd.Series(result, index=expected_roi_pct.index)
+    return int(np.asarray(result).item())

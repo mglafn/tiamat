@@ -1,11 +1,11 @@
 "use client"
 
-import React, { useState, useMemo, useRef } from "react"
+import { useState, useMemo, useRef } from "react"
 import { useHistory, useForecast, useSummary } from "@/lib/hooks"
-import { buildTimeSeries, type DriftPoint, type VolumeProfileBin } from "@/lib/series"
+import { buildTimeSeries, type DriftPoint } from "@/lib/series"
 import { usd, pct, shortUuid } from "@/lib/format"
 import { SetSelector } from "./set-selector"
-import { ShieldAlert, TrendingUp, BarChart2, Layers } from "lucide-react"
+import { ShieldAlert, TrendingUp } from "lucide-react"
 
 interface ForecastPanelProps {
   uuid: string | null
@@ -22,15 +22,12 @@ export function ForecastPanel({
   onFinishChange,
   onSelectUuid,
 }: ForecastPanelProps) {
-  const [chartMode, setChartMode] = useState<"nominal" | "risk-adj">("nominal")
   const [showBands, setShowBands] = useState(true)
-  const [showVPVR, setShowVPVR] = useState(true)
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const { data: history = [] } = useHistory(uuid, "tcgplayer", selectedFinish, 60)
-  const { data: forecast = null } = useForecast(uuid, "tcgplayer", selectedFinish)
+  const { data: history = [] } = useHistory(uuid, selectedFinish, 60)
+  const { data: forecast = null } = useForecast(uuid, selectedFinish)
   const { data: summary = null } = useSummary(uuid)
 
   // 1. Build Time Series & Stats (Explicitly returning object to avoid void type mismatch)
@@ -47,7 +44,7 @@ export function ForecastPanel({
   const W = 800
   const H = 380
   const padL = 60
-  const padR = showVPVR ? 90 : 30
+  const padR = 30
   const padT = 35
   const padB = 45
   const plotW = W - padL - padR
@@ -63,9 +60,7 @@ export function ForecastPanel({
     points.forEach((p: DriftPoint) => {
       allDays.push(p.day)
       if (p.actual != null && p.actual > 0) allPrices.push(p.actual)
-      if (p.riskAdj != null && p.riskAdj > 0) allPrices.push(p.riskAdj)
       if (p.sma7 != null && p.sma7 > 0) allPrices.push(p.sma7)
-      if (p.sma30 != null && p.sma30 > 0) allPrices.push(p.sma30)
       if (p.upper != null && p.upper > 0) allPrices.push(p.upper)
       if (p.lower != null && p.lower > 0) allPrices.push(p.lower)
       if (p.forecast != null && p.forecast > 0) allPrices.push(p.forecast)
@@ -96,11 +91,10 @@ export function ForecastPanel({
     if (valid.length === 0) return ""
     return valid
       .map((p: DriftPoint, i: number) => {
-        const val = chartMode === "risk-adj" ? (p.riskAdj ?? p.actual!) : p.actual!
-        return `${i === 0 ? "M" : "L"} ${getX(p.day).toFixed(1)} ${getY(val).toFixed(1)}`
+        return `${i === 0 ? "M" : "L"} ${getX(p.day).toFixed(1)} ${getY(p.actual!).toFixed(1)}`
       })
       .join(" ")
-  }, [points, chartMode, minDay, dRange, minP, pRange])
+  }, [points, minDay, dRange, minP, pRange])
 
   const sma7LinePath = useMemo(() => {
     const valid = points.filter((p: DriftPoint) => p.day <= 0 && p.sma7 != null)
@@ -157,14 +151,6 @@ export function ForecastPanel({
   const xTicks = useMemo(() => {
     return points.filter((p: DriftPoint) => p.day % 10 === 0 || p.day === 0 || p.day === maxDay)
   }, [points, maxDay])
-
-  // Max volume for volume bar scaling
-  const maxVol = useMemo(() => {
-    const vols = points
-      .filter((p: DriftPoint) => p.day <= 0 && p.volume != null)
-      .map((p: DriftPoint) => p.volume as number)
-    return vols.length > 0 ? Math.max(...vols) : 100
-  }, [points])
 
   const nowX = getX(0)
 
@@ -223,47 +209,14 @@ export function ForecastPanel({
           <div className="flex items-center gap-1 rounded-sm border border-border bg-surface px-1 py-0.5">
             <button
               type="button"
-              onClick={() => setChartMode("nominal")}
-              className={`rounded-[2px] px-1.5 py-0.2 text-[9px] font-semibold transition-colors ${
-                chartMode === "nominal"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-dim hover:text-foreground"
-              }`}
-            >
-              nominal
-            </button>
-            <button
-              type="button"
-              onClick={() => setChartMode("risk-adj")}
-              className={`rounded-[2px] px-1.5 py-0.2 text-[9px] font-semibold transition-colors ${
-                chartMode === "risk-adj"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-dim hover:text-foreground"
-              }`}
-            >
-              risk-adj
-            </button>
-            <button
-              type="button"
               onClick={() => setShowBands((b) => !b)}
-              className={`rounded-[2px] px-1.5 py-0.2 text-[9px] font-semibold transition-colors ${
+              className={`rounded-[2px] px-1.5 py-[1px] text-[9px] font-semibold transition-colors ${
                 showBands
                   ? "bg-surface-3 text-foreground"
                   : "text-dim hover:text-foreground opacity-50"
               }`}
             >
-              2σ bands
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowVPVR((v) => !v)}
-              className={`rounded-[2px] px-1.5 py-0.2 text-[9px] font-semibold transition-colors ${
-                showVPVR
-                  ? "bg-surface-3 text-foreground"
-                  : "text-dim hover:text-foreground opacity-50"
-              }`}
-            >
-              VPVR
+              ±MAE cone
             </button>
           </div>
 
@@ -300,15 +253,9 @@ export function ForecastPanel({
             preserveAspectRatio="none"
           >
             <defs>
-              {/* Conformal Uncertainty Cones Gradient */}
+              {/* Uncertainty Cones Gradient */}
               <linearGradient id="coneGradient" x1="0%" y1="0%" x2="100%" y2="0%">
                 <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.35" />
-                <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.05" />
-              </linearGradient>
-
-              {/* Volume Profile Fill Gradient */}
-              <linearGradient id="vpvrGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.25" />
                 <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.05" />
               </linearGradient>
             </defs>
@@ -386,64 +333,8 @@ export function ForecastPanel({
               </text>
             </g>
 
-            {/* Volume Profile Visible Range (VPVR) Histogram on Right Margin */}
-            {showVPVR &&
-              stats.volumeProfile.map((bin: VolumeProfileBin, i: number) => {
-                const y1 = getY(bin.priceHi)
-                const y2 = getY(bin.priceLo)
-                const h = Math.max(1.5, Math.abs(y2 - y1) - 1)
-                const barWidth = (bin.volumePct / 100) * (padR - 15)
+            {/* 2σ & 1σ Forward Prediction Uncertainty Cones */}
 
-                return (
-                  <g key={`vpvr-${i}`}>
-                    <rect
-                      x={W - padR + 5}
-                      y={y1}
-                      width={barWidth}
-                      height={h}
-                      fill={bin.isPOC ? "var(--accent)" : "url(#vpvrGradient)"}
-                      opacity={bin.isPOC ? 0.8 : 0.45}
-                      rx={0.5}
-                    />
-                    {bin.isPOC && (
-                      <line
-                        x1={padL}
-                        y1={y1 + h / 2}
-                        x2={W - padR + 5 + barWidth}
-                        y2={y1 + h / 2}
-                        stroke="var(--accent)"
-                        strokeDasharray="1 3"
-                        strokeWidth={0.8}
-                      />
-                    )}
-                  </g>
-                )
-              })}
-
-            {/* Historical Volume Histogram Bars at Bottom */}
-            {points
-              .filter((p: DriftPoint) => p.day <= 0 && p.volume != null)
-              .map((p: DriftPoint, i: number) => {
-                const x = getX(p.day)
-                const vH = ((p.volume || 0) / maxVol) * 45
-                const y = H - padB - vH
-                const isUp = (p.dailyReturnPct || 0) >= 0
-
-                return (
-                  <rect
-                    key={`vol-${i}`}
-                    x={x - 1.5}
-                    y={y}
-                    width={3}
-                    height={vH}
-                    fill={isUp ? "var(--up)" : "var(--down)"}
-                    opacity={0.35}
-                    rx={0.5}
-                  />
-                )
-              })}
-
-            {/* 2σ & 1σ Forward Conformal Prediction Uncertainty Cones */}
             {showBands && cone2sPolygon && (
               <polygon points={cone2sPolygon} fill="url(#coneGradient)" />
             )}
@@ -486,31 +377,6 @@ export function ForecastPanel({
                 strokeWidth={1.8}
                 strokeDasharray="4 3"
               />
-            )}
-
-            {/* Interactive Mouse Hover Crosshair Overlay */}
-            {hoveredIndex != null && points[hoveredIndex] && (
-              <g>
-                <line
-                  x1={getX(points[hoveredIndex].day)}
-                  y1={padT}
-                  x2={getX(points[hoveredIndex].day)}
-                  y2={H - padB}
-                  stroke="var(--foreground)"
-                  strokeWidth={0.8}
-                  strokeDasharray="2 2"
-                />
-                <circle
-                  cx={getX(points[hoveredIndex].day)}
-                  cy={getY(
-                    points[hoveredIndex].actual ?? points[hoveredIndex].forecast ?? stats.lastClose
-                  )}
-                  r={3.5}
-                  fill="var(--accent)"
-                  stroke="var(--surface)"
-                  strokeWidth={1.5}
-                />
-              </g>
             )}
           </svg>
         )}
@@ -558,7 +424,11 @@ export function ForecastPanel({
 
         {/* Defensive Veto Flag Pill */}
         <div>
-          {forecast?.is_defensive_vetoed ? (
+          {!forecast ? (
+            <span className="inline-flex items-center gap-1 rounded-[2px] border border-border bg-surface px-2 py-0.5 text-[9px] font-semibold text-dim">
+              <span>NO FORECAST</span>
+            </span>
+          ) : forecast.is_defensive_vetoed ? (
             <span className="inline-flex items-center gap-1 rounded-[2px] border border-warn/40 bg-warn/10 px-2 py-0.5 text-[9px] font-semibold text-warn">
               <ShieldAlert className="h-3 w-3" />
               <span>TRADE BLOCKED</span>

@@ -1,10 +1,12 @@
 // components/terminal/arbitrage-book.tsx
 'use client'
 
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUp, Download, Layers, Sparkles, Star } from 'lucide-react'
 import { useArbitrage, useCatalog } from '@/lib/hooks'
+import { computeStagedTotals } from '@/lib/economics'
 import { usd, pct, shortUuid } from '@/lib/format'
+import type { ArbitrageOpportunity } from '@/lib/types'
 
 const SPREAD_OPTIONS = [0, 2.5, 5, 10, 20]
 const FINISH_OPTIONS = ['all', 'normal', 'foil', 'etched'] as const
@@ -49,23 +51,53 @@ export function ArbitrageBook({
     [rows, selectedUuid, selectedFinish]
   )
 
+  const rowKey = (r: { uuid: string; finish: string }) => `${r.uuid}:${r.finish}`
+  const [stagedCache, setStagedCache] = useState<Record<string, ArbitrageOpportunity>>({})
+
+  useEffect(() => {
+    setStagedCache((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const r of rows) {
+        const k = `${r.uuid}:${r.finish}`
+        if (stagedUuids.has(k)) {
+          const existing = prev[k]
+          if (
+            !existing ||
+            existing.tcg_price !== r.tcg_price ||
+            existing.ck_price !== r.ck_price ||
+            existing.price_spread !== r.price_spread
+          ) {
+            next[k] = r
+            changed = true
+          }
+        }
+      }
+      for (const k of Object.keys(next)) {
+        if (!stagedUuids.has(k)) {
+          delete next[k]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [rows, stagedUuids])
+
   const stagedCount = stagedUuids.size
-  const stagedRows = useMemo(() => rows.filter((r) => stagedUuids.has(r.uuid)), [rows, stagedUuids])
+  const stagedRows = useMemo(() => {
+    const activeByKey = new Map(rows.map((r) => [rowKey(r), r]))
+    const result: ArbitrageOpportunity[] = []
+    for (const k of stagedUuids) {
+      const row = activeByKey.get(k) ?? stagedCache[k]
+      if (row) result.push(row)
+    }
+    return result
+  }, [rows, stagedUuids, stagedCache])
 
-  const stagedBasis = useMemo(
-    () => stagedRows.reduce((acc, r) => acc + (r.tcg_price || 0), 0),
+  const { stagedBasis, stagedExpectedPayout, blendedROI } = useMemo(
+    () => computeStagedTotals(stagedRows),
     [stagedRows]
   )
-
-  const stagedExpectedPayout = useMemo(
-    () => stagedRows.reduce((acc, r) => acc + (r.ck_price || 0) * 1.3, 0),
-    [stagedRows]
-  )
-
-  const blendedROI = useMemo(() => {
-    if (stagedBasis <= 0) return 0
-    return ((stagedExpectedPayout - stagedBasis) / stagedBasis) * 100
-  }, [stagedBasis, stagedExpectedPayout])
 
   useEffect(() => {
     if (!selectedUuid && rows.length > 0) {
@@ -90,9 +122,9 @@ export function ArbitrageBook({
 
       if (e.code === 'Space') {
         e.preventDefault()
-        const currentUuid = rows[selectedIndex]?.uuid
-        if (currentUuid) {
-          onToggleStage(currentUuid)
+        const currentRow = rows[selectedIndex]
+        if (currentRow) {
+          onToggleStage(rowKey(currentRow))
         }
       }
     }
@@ -113,7 +145,7 @@ export function ArbitrageBook({
     const csvLines = stagedRows.map((r) =>
       [
         r.uuid,
-        `"${r.name || 'Unknown'}"`,
+        `"${(r.name || 'Unknown').replace(/"/g, '""')}"`,
         r.set_code || 'OTC',
         r.finish,
         r.tcg_price,
@@ -209,7 +241,8 @@ export function ArbitrageBook({
           const name = r.name && r.name !== r.uuid ? r.name : meta?.name ?? shortUuid(r.uuid)
           const setCode = r.set_code ?? meta?.set_code
           const selected = r.uuid === selectedUuid && (!selectedFinish || r.finish === selectedFinish)
-          const isStaged = stagedUuids.has(r.uuid)
+          const key = rowKey(r)
+          const isStaged = stagedUuids.has(key)
           const hot = r.spread_pct >= 25.0
           const spreadBarPct = Math.min(100, Math.max(2, (r.spread_pct / maxSpreadPct) * 100))
 
@@ -237,7 +270,7 @@ export function ArbitrageBook({
               <span
                 onClick={(e) => {
                   e.stopPropagation()
-                  onToggleStage(r.uuid)
+                  onToggleStage(key)
                 }}
                 title={isStaged ? "Disarm Order" : "Arm Order for Execution"}
                 className={`relative z-10 flex h-3.5 w-7 items-center justify-center rounded-[2px] font-mono text-[8px] font-bold uppercase tracking-wider transition-all select-none cursor-pointer ${
@@ -252,8 +285,8 @@ export function ArbitrageBook({
               <span className="relative truncate">
                 <span className={selected ? 'font-semibold text-accent' : 'text-foreground'}>{name}</span>
                 {setCode && <span className="ml-1 text-dim">({setCode})</span>}
-                {r.finish === 'foil' && <span className="ml-1.5 rounded bg-warn/15 px-1 py-0.2 text-[8.5px] font-bold text-warn">FOIL</span>}
-                {r.finish === 'etched' && <span className="ml-1.5 rounded bg-accent/15 px-1 py-0.2 text-[8.5px] font-bold text-accent">ETCH</span>}
+                {r.finish === 'foil' && <span className="ml-1.5 rounded bg-warn/15 px-1 py-[1px] text-[8.5px] font-bold text-warn">FOIL</span>}
+                {r.finish === 'etched' && <span className="ml-1.5 rounded bg-accent/15 px-1 py-[1px] text-[8.5px] font-bold text-accent">ETCH</span>}
               </span>
               <span className="tnum relative w-14 text-right text-muted-foreground">{usd(r.tcg_price, { compact: true })}</span>
               <span className="tnum relative w-14 text-right font-medium text-foreground">{usd(r.ck_price, { compact: true })}</span>

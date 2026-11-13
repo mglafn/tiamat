@@ -1,10 +1,10 @@
 "use client"
 
 import { useHealth } from "@/lib/hooks"
-import { AlertTriangle, CheckCircle2, Cpu, Database, Loader2, TerminalSquare } from "lucide-react"
+import { Cpu, Database, Loader2, TerminalSquare } from "lucide-react"
 
 export function QueryConsole() {
-  const { data: health, isLoading, error } = useHealth()
+  const { data: health, isLoading } = useHealth()
 
   const dbConnected = health?.db_connected ?? false
   const modelReady = health?.model_loaded ?? false
@@ -39,7 +39,7 @@ export function QueryConsole() {
           <Cpu className="h-3 w-3 text-dim" />
           <span className="text-dim">XGBoost:</span>
           <span className={`tnum font-semibold ${modelReady ? "text-up" : "text-warn"}`}>
-            {modelReady ? "ONLINE (τ=0.89)" : "UNLOADED"}
+            {modelReady ? "ONLINE" : "UNLOADED"}
           </span>
         </div>
       </div>
@@ -53,13 +53,9 @@ export function QueryConsole() {
             <Loader2 className="h-2.5 w-2.5 animate-spin text-accent" />
             Polling engine diagnostics...
           </span>
-        ) : error ? (
-          <span className="text-down">
-            Backend offline — Run `python src/api/main.py` on :8000 to bind live analytics stream
-          </span>
         ) : isMock ? (
           <span className="text-warn">
-            Operating in fallback sandbox — Serving deterministic catalog fixtures with zero drift
+            Backend unreachable — Start FastAPI on :8000 (no offline mock fixtures mounted)
           </span>
         ) : (
           <span className="text-foreground/90">
@@ -73,7 +69,7 @@ export function QueryConsole() {
         {isMock ? (
           <span className="inline-flex items-center gap-1.5 rounded-[2px] border border-warn/40 bg-warn/10 px-2 py-0.5 text-[9px] font-semibold tracking-wider text-warn">
             <span className="h-1.5 w-1.5 rounded-full led-warn" />
-            MOCK SANDBOX
+            API OFFLINE
           </span>
         ) : (
           <span className="inline-flex items-center gap-1.5 rounded-[2px] border border-up/40 bg-up/10 px-2 py-0.5 text-[9px] font-semibold tracking-wider text-up">

@@ -47,8 +47,12 @@ MICROSTRUCTURE_CONFIG = {
 # =====================================================================
 MODEL_CONFIG = {
     "QUANTILES": [0.10, 0.50, 0.90],
+    # PLACEHOLDER: Unified right-tail spike target across training, scanning, and evaluation
     "SPIKE_THRESHOLD_PCT": float(os.getenv("SPIKE_THRESHOLD_PCT", 12.0)),
     "FLIPPER_FEE_HURDLE_PCT": float(os.getenv("FLIPPER_FEE_HURDLE_PCT", 15.0)),
+    "Q10_FLOOR_PCT": float(os.getenv("Q10_FLOOR_PCT", -15.0)),
+    "DECAY_VELOCITY_FLOOR_PCT": float(os.getenv("DECAY_VELOCITY_FLOOR_PCT", -0.5)),
+    "DEFAULT_ROI_HURDLE_PCT": float(os.getenv("DEFAULT_ROI_HURDLE_PCT", 8.0)),
     "F_BETA_RECALL_WEIGHT": float(os.getenv("F_BETA_RECALL_WEIGHT", 2.0)),
     "EMBARGO_DAYS": int(os.getenv("EMBARGO_DAYS", 14)),
 }
@@ -73,7 +77,6 @@ EVAL_CONFIG = {
     "PURGE_HORIZON_DAYS": int(os.getenv("PURGE_HORIZON_DAYS", 14)),
     "SUPPORT_CUSHION_PCT": float(os.getenv("SUPPORT_CUSHION_PCT", -2.5)),
     "DRAWDOWN_TOLERANCE_PCT": float(os.getenv("DRAWDOWN_TOLERANCE_PCT", -5.0)),
-    "SPIKE_TARGET_PCT": float(os.getenv("SPIKE_TARGET_PCT", 8.0)),
 }
 
 
@@ -82,14 +85,23 @@ EVAL_CONFIG = {
 # =====================================================================
 FEE_CONFIG = {
     "STANDARD_COMMISSION": 0.1075,
-    "PRO_COMMISSION": 0.0895,
+    "DIRECT_COMMISSION": 0.0895,
+    "PRO_FEE": 0.025,
     "COMMISSION_CAP_USD": 75.00,
     "PROCESSING_RATE": 0.025,
     "PROCESSING_FIXED_USD": 0.30,
     "DIRECT_FIXED_USD": 1.12,
+    "DIRECT_FLOOR_USD": 0.40,
+    "DIRECT_TIER1_MAX_USD": 2.49,
+    "DIRECT_TIER1_RATE": 0.50,
+    "DIRECT_DEAD_ZONE_MIN": 2.50,
+    "DIRECT_DEAD_ZONE_MAX": 2.67,
+    "DIRECT_DEAD_ZONE_MAX_PRO": 2.75,
+    "INBOUND_POSTAGE_LOW_USD": 0.99,
+    "INBOUND_POSTAGE_HIGH_USD": 0.15,
+    "INBOUND_POSTAGE_THRESHOLD_USD": 5.00,
+    "HUB_FREIGHT_USD": 0.012,
+    "OUTBOUND_BATCH_FREIGHT_USD": 0.09,
     "DEFAULT_TAX_RATE": 0.075,
     "STORE_CREDIT_MULTIPLIER": 1.30,
-    "INTAKE_DOWNGRADE_RATE": 0.035,
-    "INTAKE_REJECT_RATE": 0.005,
-    "SALVAGE_FACTOR": 0.75,
 }

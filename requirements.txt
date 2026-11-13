@@ -7,19 +7,16 @@ tqdm
 python-dotenv
 requests
 
-# Machine Learning & Time-Series Forecasting 
+# Machine Learning & Time-Series Forecasting
 scikit-learn
 xgboost
-statsmodels
 
-# API Layer & Microservice 
+# API Layer & Microservice
 fastapi
 uvicorn
 pydantic
 
-# Developer Utilities & Testing 
+# Developer Utilities & Testing
 pytest
 black
 rich
-
-react

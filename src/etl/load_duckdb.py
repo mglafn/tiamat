@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 from pathlib import Path
@@ -10,7 +9,6 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    from rich.text import Text
     from rich import box
 
     HAS_RICH = True
@@ -27,6 +25,17 @@ try:
 except ImportError:
     from src.etl.extract_prices import stream_mtg_prices
 
+SUPPORTED_FORMATS = {"paper", "mtgo"}
+SUPPORTED_VENDORS = {
+    "tcgplayer",
+    "cardkingdom",
+    "cardmarket",
+    "cardsphere",
+    "starcitygames",
+    "cardhoarder",
+    "manapool",
+}
+
 
 def parse_and_batch_records(
     raw_file_path: Path, batch_size: int = 50000
@@ -36,10 +45,13 @@ def parse_and_batch_records(
         if not isinstance(price_data, dict):
             continue
         for card_format, vendors in price_data.items():
-            if not isinstance(vendors, dict):
+            if card_format not in SUPPORTED_FORMATS or not isinstance(vendors, dict):
                 continue
             for vendor, vendor_data in vendors.items():
-                if not isinstance(vendor_data, dict):
+                if vendor not in SUPPORTED_VENDORS or not isinstance(vendor_data, dict):
+                    continue
+                currency = vendor_data.get("currency", "USD")
+                if vendor == "cardmarket" or (currency is not None and currency != "USD"):
                     continue
                 for list_type in ("retail", "buylist"):
                     list_data = vendor_data.get(list_type)
@@ -261,7 +273,11 @@ def main():
                 SELECT
                     uuid, format, vendor, list_type, finish, price_date, price,
                     MEDIAN(price) OVER w AS rolling_median,
-                    (QUANTILE_CONT(price, 0.75) OVER w - QUANTILE_CONT(price, 0.25) OVER w) AS rolling_iqr
+                    (QUANTILE_CONT(price, 0.75) OVER w - QUANTILE_CONT(price, 0.25) OVER w) AS rolling_iqr,
+                    LEAD(price, 1) OVER (
+                        PARTITION BY uuid, format, vendor, list_type, finish
+                        ORDER BY price_date
+                    ) AS next_price
                 FROM raw_fact_prices
                 WINDOW w AS (
                     PARTITION BY uuid, format, vendor, list_type, finish
@@ -284,15 +300,19 @@ def main():
             ),
             CorrectedZScore AS (
                 SELECT *,
-                    GREATEST(1.4826 * raw_mad, 0.7413 * rolling_iqr, 0.05 * rolling_median, 0.25) AS robust_scale
+                    -- PLACEHOLDER: 0.15 scale floor bounds downward glitch rejection pending spike-reversion policy
+                    GREATEST(1.4826 * raw_mad, 0.7413 * rolling_iqr, 0.15 * rolling_median, 0.25) AS robust_scale
                 FROM MADStats
             ),
             FlaggedTicks AS (
                 SELECT 
                     uuid, format, vendor, list_type, finish, price_date,
                     CASE 
-                        WHEN price < 0.40 THEN NULL
-                        WHEN (ABS(price - rolling_median) / robust_scale) > 3.5 THEN NULL
+                        WHEN format = 'paper' AND list_type = 'retail' AND price < 0.40 THEN NULL
+                        WHEN ((rolling_median - price) / robust_scale) > 3.5 THEN NULL
+                        WHEN next_price IS NOT NULL
+                             AND price > (rolling_median * 4.0)
+                             AND next_price < (price * 0.40) THEN NULL
                         ELSE price
                     END AS clean_price
                 FROM CorrectedZScore

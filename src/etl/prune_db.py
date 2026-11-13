@@ -69,19 +69,20 @@ def create_production_snapshot():
             CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
             CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
             CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
+            CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
         """
         )
 
-        # Keep ALL active arbitrage opportunities (Cast finish to VARCHAR to prevent orphaned ENUMs)
+        # Keep ALL active arbitrage opportunities
         conn.execute(
             """
             CREATE TABLE fact_arbitrage_opportunities AS
-            SELECT * EXCLUDE (finish), CAST(finish AS VARCHAR) AS finish 
+            SELECT * EXCLUDE (finish), CAST(finish AS VARCHAR)::price_finish AS finish 
             FROM src.fact_arbitrage_opportunities;
         """
         )
 
-        # Target universe: Top 700 EDHREC staples + Reserved List + All Arb Cards
+        # PLACEHOLDER: 700 EDHREC cap meets <50MB budget (note: scan_buyer_dips.py defaults to 1500)
         conn.execute(
             """
             CREATE TEMP TABLE target_tracked_cards AS
@@ -93,14 +94,25 @@ def create_production_snapshot():
         """
         )
 
-        # Features: 14 days rolling window for tracked cards (saving ~35% row volume)
+        # Features: Retain 60 days so frontend 60D history and 20D Bollinger Bands render intact
         conn.execute(
             """
             CREATE TABLE fact_card_features AS
-            SELECT f.* EXCLUDE (finish), CAST(f.finish AS VARCHAR) AS finish 
+            SELECT f.* EXCLUDE (finish), CAST(f.finish AS VARCHAR)::price_finish AS finish 
             FROM src.fact_card_features f
             JOIN target_tracked_cards t ON f.uuid = t.uuid
-            WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 14 DAY FROM src.fact_card_features);
+            WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 60 DAY FROM src.fact_card_features);
+        """
+        )
+
+        # Retain recent training/backtest slice so /api/v1/backtest and run_pipeline checks remain valid
+        conn.execute(
+            """
+            CREATE TABLE fact_training_dataset AS
+            SELECT tr.* EXCLUDE (finish), CAST(tr.finish AS VARCHAR)::price_finish AS finish
+            FROM src.fact_training_dataset tr
+            JOIN target_tracked_cards t ON tr.uuid = t.uuid
+            WHERE tr.price_date >= (SELECT MAX(price_date) - INTERVAL 30 DAY FROM src.fact_training_dataset);
         """
         )
 
@@ -124,7 +136,7 @@ def create_production_snapshot():
             CREATE TABLE fact_prices AS
             WITH ranked_prices AS (
                 SELECT
-                    uuid, format, vendor, list_type, CAST(finish AS VARCHAR) AS finish, price_date, price,
+                    uuid, format, vendor, list_type, CAST(finish AS VARCHAR)::price_finish AS finish, price_date, price,
                     ROW_NUMBER() OVER (
                         PARTITION BY uuid, finish, vendor
                         ORDER BY price_date DESC
