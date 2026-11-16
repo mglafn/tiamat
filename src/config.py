@@ -31,12 +31,10 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 MICROSTRUCTURE_CONFIG = {
     # Discrete minimum listing increment in USD (prevents zero-MAD denominator collapse)
     "MIN_TICK_USD": float(os.getenv("MIN_TICK_USD", 0.01)),
-    
     # Statistical Z-score thresholds for Downside Z
     "KNIFE_Z_SCORE_THRESH": float(os.getenv("KNIFE_Z_SCORE_THRESH", -1.96)),
     "BOTTOM_Z_SCORE_THRESH": float(os.getenv("BOTTOM_Z_SCORE_THRESH", -1.28)),
     "NOISE_Z_SCORE_BOUND": float(os.getenv("NOISE_Z_SCORE_BOUND", 1.00)),
-    
     # Exhaustion ratio cutoff (eta = a_t / (|v_t| + eps))
     "MIN_EXHAUSTION_RATIO": float(os.getenv("MIN_EXHAUSTION_RATIO", 0.25)),
 }
@@ -59,12 +57,27 @@ MODEL_CONFIG = {
 
 # Core feature schema used across training, API inference, and scanning
 FEATURE_COLS = [
-    'sma_ratio', 'volatility_14d', 'daily_return_pct', 'velocity_7d_pct',
-    'bid_ask_spread_pct', 'spread_velocity_7d', 'vendor_delta_7d',
-    'price_decay_velocity_3d', 'amihud_illiquidity_30d',
-    'z_downside_3d', 'velocity_3d', 'accel_3d', 'exhaustion_ratio',
-    'is_foil', 'is_reserved', 'mana_value', 'popularity_score',
-    'is_land', 'is_creature', 'asset_age_years', 'rarity_score'
+    "sma_ratio",
+    "volatility_14d",
+    "daily_return_pct",
+    "velocity_7d_pct",
+    "bid_ask_spread_pct",
+    "spread_velocity_7d",
+    "vendor_delta_7d",
+    "price_decay_velocity_3d",
+    "amihud_illiquidity_30d",
+    "z_downside_3d",
+    "velocity_3d",
+    "accel_3d",
+    "exhaustion_ratio",
+    "is_foil",
+    "is_reserved",
+    "mana_value",
+    "popularity_score",
+    "is_land",
+    "is_creature",
+    "asset_age_years",
+    "rarity_score",
 ]
 
 

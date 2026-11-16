@@ -21,45 +21,54 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich import box
+
     HAS_RICH = True
     console = Console()
 except ImportError:
     HAS_RICH = False
 
 
-
-def evaluate_dataframe_trades(
-    df: pd.DataFrame, is_pro: bool, sizing: str
-) -> pd.DataFrame:
-    required_cols = ['allocated_units', 'actual_future_price', 'realized_exit_payout',
-                     'unit_profit', 'net_roi_pct', 'is_win', 'total_cost', 'total_profit']
+def evaluate_dataframe_trades(df: pd.DataFrame, is_pro: bool, sizing: str) -> pd.DataFrame:
+    required_cols = [
+        "allocated_units",
+        "actual_future_price",
+        "realized_exit_payout",
+        "unit_profit",
+        "net_roi_pct",
+        "is_win",
+        "total_cost",
+        "total_profit",
+    ]
     if len(df) == 0:
         out = df.copy()
         for c in required_cols:
-            out[c] = pd.Series(dtype='float64' if c != 'is_win' else 'bool')
+            out[c] = pd.Series(dtype="float64" if c != "is_win" else "bool")
         return out
     out = df.copy()
     if sizing == "kelly":
-        out['allocated_units'] = calculate_position_size(
-            expected_roi_pct=out['exp_net_roi_pct'],
-            lower_bound_return_pct=out['cqr_lpb'],
-            basis=out['basis'],
-            amihud=out['amihud_illiquidity_30d']
+        out["allocated_units"] = calculate_position_size(
+            expected_roi_pct=out["exp_net_roi_pct"],
+            lower_bound_return_pct=out["cqr_lpb"],
+            basis=out["basis"],
+            amihud=out["amihud_illiquidity_30d"],
         )
     else:
-        out['allocated_units'] = 1.0
-        
-    out['actual_future_price'] = out['current_price'] * (1.0 + out['target_return_7d_pct'] / 100.0)
-    raw_realized_payout = calculate_direct_payout_series(out['actual_future_price'], clamp_dead_zone=True, is_pro=is_pro)
-    realized_kappa = evaluate_condition_haircut(out['actual_future_price'])
-    
-    out['realized_exit_payout'] = raw_realized_payout * realized_kappa
-    out['unit_profit'] = out['realized_exit_payout'] - out['basis']
-    out['net_roi_pct'] = (out['unit_profit'] / out['basis']) * 100.0
-    out['is_win'] = out['unit_profit'] > 0
-    out['total_cost'] = out['basis'] * out['allocated_units']
-    out['total_profit'] = out['unit_profit'] * out['allocated_units']
+        out["allocated_units"] = 1.0
+
+    out["actual_future_price"] = out["current_price"] * (1.0 + out["target_return_7d_pct"] / 100.0)
+    raw_realized_payout = calculate_direct_payout_series(
+        out["actual_future_price"], clamp_dead_zone=True, is_pro=is_pro
+    )
+    realized_kappa = evaluate_condition_haircut(out["actual_future_price"])
+
+    out["realized_exit_payout"] = raw_realized_payout * realized_kappa
+    out["unit_profit"] = out["realized_exit_payout"] - out["basis"]
+    out["net_roi_pct"] = (out["unit_profit"] / out["basis"]) * 100.0
+    out["is_win"] = out["unit_profit"] > 0
+    out["total_cost"] = out["basis"] * out["allocated_units"]
+    out["total_profit"] = out["unit_profit"] * out["allocated_units"]
     return out
+
 
 def render_terminal_scorecard(payload: dict):
     summary = payload["summary"]
@@ -67,44 +76,53 @@ def render_terminal_scorecard(payload: dict):
     funnel = payload.get("funnel", {})
     top_trades = payload["top_trades"]
     worst_trades = payload.get("worst_trades", [])
-    
+
     if not HAS_RICH:
-        print(f"\nNet PnL: ${summary['total_net_profit']:+,.2f} | ROI: {summary['portfolio_roi']:+.2f}% | Trades: {summary['total_trades']}")
+        print(
+            f"\nNet PnL: ${summary['total_net_profit']:+,.2f} | ROI: {summary['portfolio_roi']:+.2f}% | Trades: {summary['total_trades']}"
+        )
         return
-        
+
     header = Table.grid(expand=True)
     header.add_column(justify="left", ratio=3)
     header.add_column(justify="right", ratio=2)
-    
+
     title_text = Text()
     title_text.append("TIAMAT QUANT ARBITRAGE TERMINAL", style="bold cyan")
     title_text.append(" │ ", style="dim white")
     title_text.append("CQR & Risk-Gated Backtest Engine", style="bold white")
-    title_text.append("\nOut-of-Time Chronological Execution Blotter • Asymmetric Loss Shield", style="dim italic")
-    
+    title_text.append(
+        "\nOut-of-Time Chronological Execution Blotter • Asymmetric Loss Shield", style="dim italic"
+    )
+
     meta_text = Text()
-    meta_text.append(f"Window: {summary['test_start_date']} → {summary['test_end_date']}\n", style="dim white")
-    meta_text.append(f"Universe: {summary['test_universe_count']:,} active candidate instances  ", style="dim white")
+    meta_text.append(
+        f"Window: {summary['test_start_date']} → {summary['test_end_date']}\n", style="dim white"
+    )
+    meta_text.append(
+        f"Universe: {summary['test_universe_count']:,} active candidate instances  ",
+        style="dim white",
+    )
     meta_text.append("[Verified 14D Embargo]", style="bold green")
-    
+
     header.add_row(title_text, meta_text)
     console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
     console.print()
-    
+
     if funnel:
         funnel_table = Table(
             box=box.ROUNDED,
             header_style="bold blue",
             border_style="bright_black",
             expand=True,
-            title="[bold white]1. DEFENSIVE SIGNAL FUNNEL & MULTI-LAYERED GATE RETENTION[/bold white]"
+            title="[bold white]1. DEFENSIVE SIGNAL FUNNEL & MULTI-LAYERED GATE RETENTION[/bold white]",
         )
         funnel_table.add_column("Defensive Filter / Risk Gate", style="bold white")
         funnel_table.add_column("Passing Candidates", justify="right", style="cyan")
         funnel_table.add_column("Funnel Retention", justify="right", style="bold yellow")
         funnel_table.add_column("Filtration Function", style="dim")
-        
-        tot = summary['test_universe_count']
+
+        tot = summary["test_universe_count"]
         descriptions = {
             "Total Test Candidates": "Unfiltered out-of-time candidate universe",
             "Stage 1 Spike Mover (τ)": "Right-tail upward spike conviction (P >= tau)",
@@ -116,50 +134,54 @@ def render_terminal_scorecard(payload: dict):
             pct = f"{(count / tot) * 100:.3f}%" if tot > 0 else "0%"
             desc = descriptions.get(stage, "Analytical risk filter")
             funnel_table.add_row(stage, f"{count:,}", pct, desc)
-            
+
         console.print(funnel_table)
         console.print()
-        
+
     pnl = summary["total_net_profit"]
     roi = summary["portfolio_roi"]
     win_rate = summary["win_rate"]
     pnl_color = "bold green" if pnl >= 0 else "bold red"
     roi_color = "bold green" if roi >= 0 else "bold red"
-    
+
     score_table = Table(
         box=box.ROUNDED,
         show_header=True,
         header_style="bold cyan",
         border_style="bright_black",
         expand=True,
-        title="[bold white]2. STRATEGY PERFORMANCE SCORECARD & CAPITAL EFFICIENCY[/bold white]"
+        title="[bold white]2. STRATEGY PERFORMANCE SCORECARD & CAPITAL EFFICIENCY[/bold white]",
     )
     score_table.add_column("Net Realized PnL ($)", justify="center")
     score_table.add_column("Portfolio ROI (%)", justify="center")
     score_table.add_column("Win Rate (W / L Count)", justify="center")
     score_table.add_column("Capital Committed ($)", justify="center")
     score_table.add_column("Ablation Loss Shield", justify="center", style="dim green")
-    
+
     naive_loss_diff = ablation.get("naive_profit", 0.0) - pnl
-    shield_msg = f"+${abs(naive_loss_diff):,.2f} Preserved" if pnl >= ablation.get("naive_profit", 0.0) else "—"
-    
+    shield_msg = (
+        f"+${abs(naive_loss_diff):,.2f} Preserved"
+        if pnl >= ablation.get("naive_profit", 0.0)
+        else "—"
+    )
+
     score_table.add_row(
         f"[{pnl_color}]${pnl:+,.2f}[/{pnl_color}]",
         f"[{roi_color}]{roi:+.2f}%[/{roi_color}]",
         f"{win_rate:.1f}% ({summary['win_trades']}W / {summary['loss_trades']}L)",
         f"${summary['total_capital']:,.2f}",
-        f"[bold green]{shield_msg}[/bold green]"
+        f"[bold green]{shield_msg}[/bold green]",
     )
     console.print(score_table)
     console.print()
-    
+
     if len(top_trades) > 0:
         win_table = Table(
             title=f"[bold white]3. EXECUTED TRADES BLOTTER (Showing Top {len(top_trades)} Alpha Executions)[/bold white]",
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold green",
-            expand=True
+            expand=True,
         )
         win_table.add_column("Execution Date", style="dim")
         win_table.add_column("Card SKU / Name", style="bold white")
@@ -170,23 +192,25 @@ def render_terminal_scorecard(payload: dict):
         win_table.add_column("Realized Exit", justify="right")
         win_table.add_column("Net Profit", justify="right", style="bold green")
         win_table.add_column("Net ROI", justify="right", style="bold green")
-        
+
         for t in top_trades:
             win_table.add_row(
                 t["price_date"],
-                t['name'],
-                t['set_code'],
+                t["name"],
+                t["set_code"],
                 t["finish"].upper(),
                 str(t.get("allocated_units", 1)),
                 f"${t['basis']:.2f}",
                 f"${t['realized_exit_payout']:.2f}",
                 f"${t['total_profit']:+,.2f}",
-                f"{t['net_roi_pct']:+.1f}%"
+                f"{t['net_roi_pct']:+.1f}%",
             )
         console.print(win_table)
         console.print()
     else:
-        console.print("[dim yellow]ℹ No trades passed all defensive gates in this evaluation window. (Capital 100% preserved)[/dim yellow]\n")
+        console.print(
+            "[dim yellow]ℹ No trades passed all defensive gates in this evaluation window. (Capital 100% preserved)[/dim yellow]\n"
+        )
 
     if len(worst_trades) > 0:
         loss_table = Table(
@@ -194,7 +218,7 @@ def render_terminal_scorecard(payload: dict):
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold red",
-            expand=True
+            expand=True,
         )
         loss_table.add_column("Execution Date", style="dim")
         loss_table.add_column("Card SKU / Name", style="bold white")
@@ -205,21 +229,22 @@ def render_terminal_scorecard(payload: dict):
         loss_table.add_column("Realized Exit", justify="right")
         loss_table.add_column("Net Profit", justify="right", style="bold red")
         loss_table.add_column("Net ROI", justify="right", style="bold red")
-        
+
         for w in worst_trades:
             loss_table.add_row(
                 w["price_date"],
-                w['name'],
-                w['set_code'],
+                w["name"],
+                w["set_code"],
                 w["finish"].upper(),
                 str(w.get("allocated_units", 1)),
                 f"${w['basis']:.2f}",
                 f"${w['realized_exit_payout']:.2f}",
                 f"${w['total_profit']:+,.2f}",
-                f"{w['net_roi_pct']:+.1f}%"
+                f"{w['net_roi_pct']:+.1f}%",
             )
         console.print(loss_table)
         console.print()
+
 
 def run_arbitrage_backtest(
     min_net_roi_pct: float = 8.0,
@@ -232,7 +257,7 @@ def run_arbitrage_backtest(
     db_path: Path = DB_PATH,
     model_path: Path = MODEL_PATH,
     as_dict: bool = False,
-    top_n_records: int = 8
+    top_n_records: int = 8,
 ):
     if not model_path.exists() or not db_path.exists():
         err_msg = f"Missing database ({db_path}) or model artifact ({model_path})."
@@ -240,16 +265,20 @@ def run_arbitrage_backtest(
             raise FileNotFoundError(err_msg)
         print(f"Error: {err_msg}", file=sys.stderr)
         return
-        
+
     artifact = joblib.load(model_path)
     q_models = artifact.get("quantile_models", {})
     calibrator = artifact.get("isotonic_calibrator")
     feature_cols = artifact["feature_cols"]
     metrics = artifact.get("metrics", {})
     # PLACEHOLDER: Shares calibrated buyer spike threshold pending dedicated Flipper entry rule
-    prob_threshold = tau if tau is not None else metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
+    prob_threshold = (
+        tau
+        if tau is not None
+        else metrics.get("tau_buyer_radar", metrics.get("prob_threshold", 0.40))
+    )
     persisted_split_date = metrics.get("split_date", None)
-    
+
     feature_select_sql = ", ".join([f"f.{col}" for col in FEATURE_COLS])
     conn = duckdb.connect(str(db_path), read_only=True)
     query = f"""
@@ -268,46 +297,64 @@ def run_arbitrage_backtest(
     """
     df = conn.execute(query).fetchdf()
     conn.close()
-    
+
     if len(df) == 0:
-        return {"status": "empty", "message": "No historical instances in dataset"} if as_dict else None
-        
-    df['price_date'] = pd.to_datetime(df['price_date'])
-    test_start_date = pd.to_datetime(persisted_split_date) if persisted_split_date else df['price_date'].max() - pd.Timedelta(days=12)
-    test_df = df[df['price_date'] >= test_start_date].copy().reset_index(drop=True)
-    
+        return (
+            {"status": "empty", "message": "No historical instances in dataset"}
+            if as_dict
+            else None
+        )
+
+    df["price_date"] = pd.to_datetime(df["price_date"])
+    test_start_date = (
+        pd.to_datetime(persisted_split_date)
+        if persisted_split_date
+        else df["price_date"].max() - pd.Timedelta(days=12)
+    )
+    test_df = df[df["price_date"] >= test_start_date].copy().reset_index(drop=True)
+
     if len(test_df) == 0:
-        return {"status": "empty", "message": f"No records >= {test_start_date.date()}"} if as_dict else None
-        
+        return (
+            {"status": "empty", "message": f"No records >= {test_start_date.date()}"}
+            if as_dict
+            else None
+        )
+
     X_test = test_df[feature_cols].fillna(0.0)
     if q_models and calibrator and all(q in q_models for q in (0.10, 0.50, 0.90)):
         q50 = q_models[0.50].predict(X_test)
         q90 = np.maximum(q_models[0.90].predict(X_test), q50)
         q10 = np.minimum(q_models[0.10].predict(X_test), q50)
-        test_df['move_prob'] = calibrator.transform(q90)
-        test_df['pred_magnitude'] = q50
-        test_df['cqr_lpb'] = q10
+        test_df["move_prob"] = calibrator.transform(q90)
+        test_df["pred_magnitude"] = q50
+        test_df["cqr_lpb"] = q10
     else:
-        test_df['move_prob'] = 0.0
-        test_df['pred_magnitude'] = 0.0
-        test_df['cqr_lpb'] = MODEL_CONFIG["Q10_FLOOR_PCT"]
+        test_df["move_prob"] = 0.0
+        test_df["pred_magnitude"] = 0.0
+        test_df["cqr_lpb"] = MODEL_CONFIG["Q10_FLOOR_PCT"]
 
-    test_df['basis'] = landed_basis_series(test_df['current_price'], channel="direct")
-    test_df['exp_exit'] = np.maximum(0.01, test_df['current_price'] * (1.0 + test_df['pred_magnitude'] / 100.0))
+    test_df["basis"] = landed_basis_series(test_df["current_price"], channel="direct")
+    test_df["exp_exit"] = np.maximum(
+        0.01, test_df["current_price"] * (1.0 + test_df["pred_magnitude"] / 100.0)
+    )
 
-    payout_win_raw = calculate_direct_payout_series(test_df['exp_exit'], clamp_dead_zone=True, is_pro=is_pro)
-    kappa_win = evaluate_condition_haircut(test_df['exp_exit'])
-    test_df['payout_win'] = payout_win_raw * kappa_win
-    test_df['profit_win'] = test_df['payout_win'] - test_df['basis']
+    payout_win_raw = calculate_direct_payout_series(
+        test_df["exp_exit"], clamp_dead_zone=True, is_pro=is_pro
+    )
+    kappa_win = evaluate_condition_haircut(test_df["exp_exit"])
+    test_df["payout_win"] = payout_win_raw * kappa_win
+    test_df["profit_win"] = test_df["payout_win"] - test_df["basis"]
 
-    test_df['exp_net_profit'] = test_df['profit_win']
-    test_df['exp_net_roi_pct'] = (test_df['exp_net_profit'] / test_df['basis']) * 100.0
+    test_df["exp_net_profit"] = test_df["profit_win"]
+    test_df["exp_net_roi_pct"] = (test_df["exp_net_profit"] / test_df["basis"]) * 100.0
 
-    stage1_mask = (test_df['move_prob'] >= prob_threshold) & (test_df['pred_magnitude'] > 0.0)
-    cqr_safety_mask = test_df['cqr_lpb'] >= MODEL_CONFIG["Q10_FLOOR_PCT"]
-    decay_filter = test_df['price_decay_velocity_3d'] >= MODEL_CONFIG["DECAY_VELOCITY_FLOOR_PCT"]
-    roi_hurdle_mask = test_df['exp_net_roi_pct'] >= min_net_roi_pct
-    naive_mask = stage1_mask & (((test_df['profit_win'] / test_df['basis']) * 100.0) >= min_net_roi_pct)
+    stage1_mask = (test_df["move_prob"] >= prob_threshold) & (test_df["pred_magnitude"] > 0.0)
+    cqr_safety_mask = test_df["cqr_lpb"] >= MODEL_CONFIG["Q10_FLOOR_PCT"]
+    decay_filter = test_df["price_decay_velocity_3d"] >= MODEL_CONFIG["DECAY_VELOCITY_FLOOR_PCT"]
+    roi_hurdle_mask = test_df["exp_net_roi_pct"] >= min_net_roi_pct
+    naive_mask = stage1_mask & (
+        ((test_df["profit_win"] / test_df["basis"]) * 100.0) >= min_net_roi_pct
+    )
 
     if filter_mode == "exp_roi":
         active_mask = stage1_mask & roi_hurdle_mask
@@ -321,7 +368,7 @@ def run_arbitrage_backtest(
         "Stage 1 Spike Mover (τ)": int(stage1_mask.sum()),
         "q10 Downside Floor Passed": int((stage1_mask & cqr_safety_mask).sum()),
         "Set Decay Filter Passed": int((stage1_mask & cqr_safety_mask & decay_filter).sum()),
-        "Net ROI Hurdle Cleared": int(active_mask.sum())
+        "Net ROI Hurdle Cleared": int(active_mask.sum()),
     }
 
     buy_signals = test_df[active_mask].copy()
@@ -330,46 +377,70 @@ def run_arbitrage_backtest(
     if len(buy_signals) > 0:
         buy_signals = buy_signals.sort_values(by="exp_net_roi_pct", ascending=False)
         if top_daily > 0:
-            buy_signals = buy_signals.groupby('price_date', group_keys=False).head(top_daily).reset_index(drop=True)
+            buy_signals = (
+                buy_signals.groupby("price_date", group_keys=False)
+                .head(top_daily)
+                .reset_index(drop=True)
+            )
 
     buy_signals = evaluate_dataframe_trades(buy_signals, is_pro, sizing)
     if sizing == "kelly" and len(buy_signals) > 0:
-        buy_signals = buy_signals[buy_signals['allocated_units'] > 0].reset_index(drop=True)
-    naive_signals = evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat") if show_ablation else naive_signals.iloc[0:0]
-    
+        buy_signals = buy_signals[buy_signals["allocated_units"] > 0].reset_index(drop=True)
+    naive_signals = (
+        evaluate_dataframe_trades(naive_signals, is_pro, sizing="flat")
+        if show_ablation
+        else naive_signals.iloc[0:0]
+    )
+
     total_trades = len(buy_signals)
-    win_trades = int(buy_signals['is_win'].sum()) if total_trades > 0 else 0
+    win_trades = int(buy_signals["is_win"].sum()) if total_trades > 0 else 0
     loss_trades = total_trades - win_trades
     win_rate = (win_trades / total_trades) * 100.0 if total_trades > 0 else 0.0
-    total_capital = float(buy_signals['total_cost'].sum()) if total_trades > 0 else 0.0
-    total_net_profit = float(buy_signals['total_profit'].sum()) if total_trades > 0 else 0.0
+    total_capital = float(buy_signals["total_cost"].sum()) if total_trades > 0 else 0.0
+    total_net_profit = float(buy_signals["total_profit"].sum()) if total_trades > 0 else 0.0
     portfolio_roi = (total_net_profit / total_capital) * 100.0 if total_capital > 0 else 0.0
-    
+
     def sanitize_trade_records(df_slice):
-        if len(df_slice) == 0 or 'total_profit' not in df_slice.columns:
+        if len(df_slice) == 0 or "total_profit" not in df_slice.columns:
             return []
         out = []
         for _, r in df_slice.iterrows():
-            out.append({
-                "uuid": r["uuid"],
-                "name": r["name"],
-                "set_code": r["set_code"],
-                "finish": r["finish"],
-                "price_date": str(r["price_date"].date()),
-                "current_price": round(float(r["current_price"]), 2),
-                "basis": round(float(r["basis"]), 2),
-                "realized_exit_payout": round(float(r["realized_exit_payout"]), 2),
-                "actual_future_price": round(float(r["actual_future_price"]), 2),
-                "allocated_units": int(r.get("allocated_units", 1)),
-                "total_profit": round(float(r["total_profit"]), 2),
-                "net_roi_pct": round(float(r["net_roi_pct"]), 2),
-                "is_win": bool(r["is_win"])
-            })
+            out.append(
+                {
+                    "uuid": r["uuid"],
+                    "name": r["name"],
+                    "set_code": r["set_code"],
+                    "finish": r["finish"],
+                    "price_date": str(r["price_date"].date()),
+                    "current_price": round(float(r["current_price"]), 2),
+                    "basis": round(float(r["basis"]), 2),
+                    "realized_exit_payout": round(float(r["realized_exit_payout"]), 2),
+                    "actual_future_price": round(float(r["actual_future_price"]), 2),
+                    "allocated_units": int(r.get("allocated_units", 1)),
+                    "total_profit": round(float(r["total_profit"]), 2),
+                    "net_roi_pct": round(float(r["net_roi_pct"]), 2),
+                    "is_win": bool(r["is_win"]),
+                }
+            )
         return out
-        
-    top_trades_list = sanitize_trade_records(buy_signals.sort_values(by='total_profit', ascending=False).head(top_n_records)) if total_trades > 0 else []
-    worst_trades_list = sanitize_trade_records(buy_signals[buy_signals['total_profit'] < 0].sort_values(by='total_profit', ascending=True).head(top_n_records)) if total_trades > 0 else []
-    
+
+    top_trades_list = (
+        sanitize_trade_records(
+            buy_signals.sort_values(by="total_profit", ascending=False).head(top_n_records)
+        )
+        if total_trades > 0
+        else []
+    )
+    worst_trades_list = (
+        sanitize_trade_records(
+            buy_signals[buy_signals["total_profit"] < 0]
+            .sort_values(by="total_profit", ascending=True)
+            .head(top_n_records)
+        )
+        if total_trades > 0
+        else []
+    )
+
     payload = {
         "status": "success",
         "params": {
@@ -378,7 +449,7 @@ def run_arbitrage_backtest(
             "filter_mode": filter_mode,
             "sizing": sizing,
             "top_daily": top_daily,
-            "is_pro": is_pro
+            "is_pro": is_pro,
         },
         "funnel": funnel_counts,
         "summary": {
@@ -391,35 +462,45 @@ def run_arbitrage_backtest(
             "portfolio_roi": round(portfolio_roi, 2),
             "test_universe_count": len(test_df),
             "test_start_date": str(test_start_date.date()),
-            "test_end_date": str(test_df['price_date'].max().date())
+            "test_end_date": str(test_df["price_date"].max().date()),
         },
         "ablation": {
             "naive_trades": len(naive_signals),
-            "naive_profit": round(float(naive_signals['total_profit'].sum()), 2) if len(naive_signals) > 0 else 0.0
+            "naive_profit": (
+                round(float(naive_signals["total_profit"].sum()), 2)
+                if len(naive_signals) > 0
+                else 0.0
+            ),
         },
         "top_trades": top_trades_list,
-        "worst_trades": worst_trades_list
+        "worst_trades": worst_trades_list,
     }
-    
+
     if not as_dict:
         render_terminal_scorecard(payload)
-        
+
     return payload
+
 
 def main():
     parser = argparse.ArgumentParser(description="Tiamat Quant Terminal Backtest Engine")
     parser.add_argument("--hurdle", type=float, default=8.0, help="Minimum net ROI %% hurdle")
-    parser.add_argument("--tau", type=float, default=None, help="Spike probability threshold (default: auto from model)")
-    parser.add_argument("--sizing", choices=["flat", "kelly"], default="kelly", help="Position sizing model")
+    parser.add_argument(
+        "--tau",
+        type=float,
+        default=None,
+        help="Spike probability threshold (default: auto from model)",
+    )
+    parser.add_argument(
+        "--sizing", choices=["flat", "kelly"], default="kelly", help="Position sizing model"
+    )
     parser.add_argument("--top-daily", type=int, default=0, help="Daily trade cap")
     args = parser.parse_args()
-    
+
     run_arbitrage_backtest(
-        min_net_roi_pct=args.hurdle,
-        tau=args.tau,
-        sizing=args.sizing,
-        top_daily=args.top_daily
+        min_net_roi_pct=args.hurdle, tau=args.tau, sizing=args.sizing, top_daily=args.top_daily
     )
+
 
 if __name__ == "__main__":
     main()

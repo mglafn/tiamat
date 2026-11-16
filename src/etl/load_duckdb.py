@@ -123,8 +123,7 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
         print(f"Ingesting enriched dimension catalog from {posix_path}...")
 
     conn.execute("DROP TABLE IF EXISTS dim_cards")
-    conn.execute(
-        f"""
+    conn.execute(f"""
         CREATE TABLE dim_cards AS
         SELECT
             uuid,
@@ -139,8 +138,7 @@ def load_dimension_cards(conn: duckdb.DuckDBPyConnection, cards_csv_path: Path):
             COALESCE(types, 'Unknown') AS card_type,
             TRY_CAST(originalReleaseDate AS DATE) AS original_release_date
         FROM read_csv_auto('{posix_path}', header=true, ignore_errors=true)
-    """
-    )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
 
@@ -202,8 +200,7 @@ def main():
     )
 
     try:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
             CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
             CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
@@ -219,8 +216,7 @@ def main():
                 price_date DATE,
                 price FLOAT
             );
-        """
-        )
+        """)
 
         if HAS_RICH:
             console.print(
@@ -234,8 +230,7 @@ def main():
 
         for df_batch in parse_and_batch_records(raw_feed_path):
             conn.register("df_batch_view", df_batch)
-            conn.execute(
-                """
+            conn.execute("""
                 INSERT INTO raw_fact_prices
                 SELECT
                     uuid,
@@ -246,8 +241,7 @@ def main():
                     CAST(price_date AS DATE),
                     CAST(price AS FLOAT)
                 FROM df_batch_view
-            """
-            )
+            """)
             conn.unregister("df_batch_view")
             total_rows += len(df_batch)
             batch_idx += 1
@@ -265,8 +259,7 @@ def main():
         else:
             print("Applying Robust Hampel MAD Filter for Anomaly Rejection...")
 
-        conn.execute(
-            """
+        conn.execute("""
             DROP TABLE IF EXISTS fact_prices;
             CREATE TABLE fact_prices AS
             WITH RollingWindowStats AS (
@@ -328,8 +321,7 @@ def main():
                 FROM FlaggedTicks
             )
             SELECT * FROM ForwardFilled WHERE price IS NOT NULL;
-        """
-        )
+        """)
         conn.execute("DROP TABLE raw_fact_prices;")
 
         final_rows = conn.execute("SELECT COUNT(*) FROM fact_prices").fetchone()[0]
@@ -346,9 +338,7 @@ def main():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fact_prices_lookup ON fact_prices(uuid, finish);"
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fact_prices_date ON fact_prices(price_date);")
 
         if cards_csv_path.exists():
             load_dimension_cards(conn, cards_csv_path)
@@ -358,9 +348,7 @@ def main():
                     f"[bold yellow]Warning:[/bold yellow] {cards_csv_path} not found. Skipping dim_cards."
                 )
             else:
-                print(
-                    f"Warning: {cards_csv_path} not found. Skipping dim_cards creation."
-                )
+                print(f"Warning: {cards_csv_path} not found. Skipping dim_cards creation.")
 
         elapsed = time.time() - start_time
         if HAS_RICH:

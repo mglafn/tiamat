@@ -20,6 +20,7 @@ try:
     from rich.panel import Panel
     from rich.text import Text
     from rich import box
+
     HAS_RICH = True
     console = Console()
 except ImportError:
@@ -41,7 +42,7 @@ def scan_buyer_dips(
     top_n: int = 8,
     reserved_only: bool = False,
     db_path: Path = DB_PATH,
-    model_path: Path = MODEL_PATH
+    model_path: Path = MODEL_PATH,
 ):
     if not db_path.exists():
         print(f"Error: Database not found at {db_path}. Please run ETL first.", file=sys.stderr)
@@ -50,7 +51,11 @@ def scan_buyer_dips(
     # 1. Connect to DuckDB & pull feature store snapshot
     conn = duckdb.connect(str(db_path), read_only=True)
     reserved_clause = "AND d.is_reserved = true" if reserved_only else ""
-    rank_clause = f"AND (d.edhrec_rank IS NOT NULL AND d.edhrec_rank <= {max_edhrec_rank})" if max_edhrec_rank > 0 else ""
+    rank_clause = (
+        f"AND (d.edhrec_rank IS NOT NULL AND d.edhrec_rank <= {max_edhrec_rank})"
+        if max_edhrec_rank > 0
+        else ""
+    )
 
     query = f"""
         WITH latest_snapshot AS (
@@ -86,14 +91,16 @@ def scan_buyer_dips(
         return
 
     # 2. Compute Buyer Value & Discount Metrics
-    df['discount_sma30_pct'] = ((df['sma_30'] - df['current_price']) / df['sma_30']) * 100.0
-    df['dollar_savings'] = df['sma_30'] - df['current_price']
-    df['buyer_landed_cost'] = landed_basis_series(df['current_price'], tax_rate=tax_rate, channel="buyer")
+    df["discount_sma30_pct"] = ((df["sma_30"] - df["current_price"]) / df["sma_30"]) * 100.0
+    df["dollar_savings"] = df["sma_30"] - df["current_price"]
+    df["buyer_landed_cost"] = landed_basis_series(
+        df["current_price"], tax_rate=tax_rate, channel="buyer"
+    )
 
     # 3. Model Inference (Pre-Spike Alerts)
 
-    df['move_prob'] = 0.0
-    df['pred_spike_pct'] = 0.0
+    df["move_prob"] = 0.0
+    df["pred_spike_pct"] = 0.0
     prob_threshold = 0.40
 
     if model_path.exists():
@@ -102,7 +109,9 @@ def scan_buyer_dips(
             q_models = artifact.get("quantile_models", {})
             calibrator = artifact.get("isotonic_calibrator")
             feature_cols = artifact.get("feature_cols", [])
-            prob_threshold = artifact.get("metrics", {}).get("tau_buyer_radar", artifact.get("metrics", {}).get("prob_threshold", 0.40))
+            prob_threshold = artifact.get("metrics", {}).get(
+                "tau_buyer_radar", artifact.get("metrics", {}).get("prob_threshold", 0.40)
+            )
 
             if all(c in df.columns for c in feature_cols):
                 X = df[feature_cols].fillna(0.0)
@@ -110,53 +119,56 @@ def scan_buyer_dips(
                     preds_q90 = q_models[0.90].predict(X)
                     if 0.50 in q_models:
                         preds_q90 = np.maximum(preds_q90, q_models[0.50].predict(X))
-                    df['move_prob'] = calibrator.transform(preds_q90)
-                    df['pred_spike_pct'] = preds_q90
+                    df["move_prob"] = calibrator.transform(preds_q90)
+                    df["pred_spike_pct"] = preds_q90
         except Exception:
             pass  # Fall back gracefully to pure rule-based dip detection
 
     # 4. Classify Market States (aligned with verify_buyer_dips.py regimes)
     # State A: Local Floor Confirmed (Scale-Invariant Deceleration + SMA discount)
-    floor_mask = (
-        (df['microstructure_regime'] == 'CONFIRMED_LOCAL_BOTTOM') &
-        (df['discount_sma30_pct'] >= min_discount_pct)
+    floor_mask = (df["microstructure_regime"] == "CONFIRMED_LOCAL_BOTTOM") & (
+        df["discount_sma30_pct"] >= min_discount_pct
     )
 
     # State B: Urgent Pre-Spike Alert (Calibrated q_0.90 breakout probability >= tau)
-    breakout_mask = (
-        (df['move_prob'] >= prob_threshold) &
-        (df['pred_spike_pct'] >= MODEL_CONFIG["SPIKE_THRESHOLD_PCT"])
+    breakout_mask = (df["move_prob"] >= prob_threshold) & (
+        df["pred_spike_pct"] >= MODEL_CONFIG["SPIKE_THRESHOLD_PCT"]
     )
 
     # State C: Falling Knife (Scale-invariant downward acceleration)
-    knife_mask = (
-        (df['microstructure_regime'] == 'FALLING_KNIFE') &
-        (~breakout_mask)
-    )
+    knife_mask = (df["microstructure_regime"] == "FALLING_KNIFE") & (~breakout_mask)
 
     floor_df = df[floor_mask].sort_values(by="discount_sma30_pct", ascending=False).head(top_n)
     breakout_df = df[breakout_mask].sort_values(by="move_prob", ascending=False).head(top_n)
     knife_df = df[knife_mask].sort_values(by="price_decay_velocity_3d", ascending=True).head(top_n)
 
     # 5. Render Output
-    render_buyer_report(df, floor_df, breakout_df, knife_df, min_discount_pct, prob_threshold, top_n)
+    render_buyer_report(
+        df, floor_df, breakout_df, knife_df, min_discount_pct, prob_threshold, top_n
+    )
+
 
 def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount, tau, top_n):
     if not HAS_RICH:
         print(f"\n--- TIAMAT BUYER RADAR (Universe: {len(total_df):,} staples) ---")
-        print(f"Confirmed Floors: {len(floor_df)} | Pre-Spike Breakouts: {len(breakout_df)} | Falling Knives: {len(knife_df)}")
+        print(
+            f"Confirmed Floors: {len(floor_df)} | Pre-Spike Breakouts: {len(breakout_df)} | Falling Knives: {len(knife_df)}"
+        )
         return
 
     # Header Panel
     header = Table.grid(expand=True)
     header.add_column(justify="left", ratio=3)
     header.add_column(justify="right", ratio=2)
-    
+
     title = Text()
     title.append("TIAMAT QUANT TERMINAL", style="bold cyan")
     title.append(" │ ", style="dim white")
     title.append("Staple Floor & Dip Accumulator", style="bold green")
-    title.append("\nDeckbuilder Acquisition Radar • No Resale Friction • Mean-Reversion Timing", style="dim italic")
+    title.append(
+        "\nDeckbuilder Acquisition Radar • No Resale Friction • Mean-Reversion Timing",
+        style="dim italic",
+    )
 
     meta = Text()
     meta.append(f"Evaluated Staples: {len(total_df):,} SKUs\n", style="dim white")
@@ -172,7 +184,7 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold green",
-            expand=True
+            expand=True,
         )
         table_floor.add_column("Card Name", style="bold white", max_width=24, overflow="ellipsis")
         table_floor.add_column("Set", justify="center", style="cyan")
@@ -190,18 +202,20 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
                 r["name"],
                 r["set_code"],
                 r["finish"].upper(),
-                f"#{int(r['edhrec_rank']):,}" if pd.notna(r['edhrec_rank']) else "—",
+                f"#{int(r['edhrec_rank']):,}" if pd.notna(r["edhrec_rank"]) else "—",
                 f"${r['current_price']:.2f}",
                 f"${r['buyer_landed_cost']:.2f}",
                 f"${r['sma_30']:.2f}",
                 f"-{r['discount_sma30_pct']:.1f}%",
                 f"+${r['dollar_savings']:.2f}",
-                f"{r['price_decay_velocity_3d']:+.2f}%/d"
+                f"{r['price_decay_velocity_3d']:+.2f}%/d",
             )
         console.print(table_floor)
         console.print()
     else:
-        console.print(f"[dim yellow]ℹ No active staples have stabilized at >= {min_discount:.1f}% discount today.[/dim yellow]\n")
+        console.print(
+            f"[dim yellow]ℹ No active staples have stabilized at >= {min_discount:.1f}% discount today.[/dim yellow]\n"
+        )
 
     # Section 2: Pre-Spike Breakout Alerts
     if len(breakout_df) > 0:
@@ -210,9 +224,11 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold yellow",
-            expand=True
+            expand=True,
         )
-        table_breakout.add_column("Card Name", style="bold white", max_width=24, overflow="ellipsis")
+        table_breakout.add_column(
+            "Card Name", style="bold white", max_width=24, overflow="ellipsis"
+        )
         table_breakout.add_column("Set", justify="center", style="cyan")
         table_breakout.add_column("Finish", justify="center", style="yellow")
         table_breakout.add_column("Current Price", justify="right")
@@ -222,7 +238,7 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
         table_breakout.add_column("Action Directive", style="bold white")
 
         for _, r in breakout_df.iterrows():
-            proj_price = r['current_price'] * (1.0 + r['pred_spike_pct'] / 100.0)
+            proj_price = r["current_price"] * (1.0 + r["pred_spike_pct"] / 100.0)
             table_breakout.add_row(
                 r["name"],
                 r["set_code"],
@@ -231,12 +247,14 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
                 f"{r['move_prob']:.1%}",
                 f"+{r['pred_spike_pct']:.1f}%",
                 f"${proj_price:.2f}",
-                "[bold red]BUY BEFORE SPIKE[/bold red]"
+                "[bold red]BUY BEFORE SPIKE[/bold red]",
             )
         console.print(table_breakout)
         console.print()
     else:
-        console.print("[dim green]✔ No imminent buyout spikes detected across tracked staple universe.[/dim green]\n")
+        console.print(
+            "[dim green]✔ No imminent buyout spikes detected across tracked staple universe.[/dim green]\n"
+        )
 
     # Section 3: Falling Knife Warning
     if len(knife_df) > 0:
@@ -245,7 +263,7 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
             box=box.ROUNDED,
             border_style="bright_black",
             header_style="bold magenta",
-            expand=True
+            expand=True,
         )
         table_knife.add_column("Card Name", style="bold white", max_width=24, overflow="ellipsis")
         table_knife.add_column("Set", justify="center", style="cyan")
@@ -263,22 +281,33 @@ def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount,
                 f"${r['current_price']:.2f}",
                 f"-{r['discount_sma30_pct']:.1f}%",
                 f"{r['price_decay_velocity_3d']:.2f}%/d",
-                "DO NOT BUY YET — Bleed active"
+                "DO NOT BUY YET — Bleed active",
             )
         console.print(table_knife)
         console.print()
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Tiamat Quant Terminal - Generalist Buyer & Deckbuilder Dip Scanner",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--min-discount", type=float, default=8.0, help="Minimum %% discount below 30D SMA")
-    parser.add_argument("--max-rank", type=int, default=1500, help="Max EDHREC rank filter (0 for all cards)")
-    parser.add_argument("--min-price", type=float, default=2.00, help="Minimum retail floor price to evaluate")
+    parser.add_argument(
+        "--min-discount", type=float, default=8.0, help="Minimum %% discount below 30D SMA"
+    )
+    parser.add_argument(
+        "--max-rank", type=int, default=1500, help="Max EDHREC rank filter (0 for all cards)"
+    )
+    parser.add_argument(
+        "--min-price", type=float, default=2.00, help="Minimum retail floor price to evaluate"
+    )
     parser.add_argument("--tax", type=float, default=7.5, help="Estimated local sales tax %%")
-    parser.add_argument("--top", "-n", type=int, default=8, help="Number of records to display in each section")
-    parser.add_argument("--reserved-only", action="store_true", help="Scan only Reserved List assets")
+    parser.add_argument(
+        "--top", "-n", type=int, default=8, help="Number of records to display in each section"
+    )
+    parser.add_argument(
+        "--reserved-only", action="store_true", help="Scan only Reserved List assets"
+    )
     args = parser.parse_args()
 
     scan_buyer_dips(
@@ -287,8 +316,9 @@ def main():
         min_price=args.min_price,
         tax_rate=args.tax / 100.0,
         top_n=args.top,
-        reserved_only=args.reserved_only
+        reserved_only=args.reserved_only,
     )
+
 
 if __name__ == "__main__":
     main()

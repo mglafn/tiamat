@@ -3,6 +3,7 @@ src/analytics/sizing.py
 -----------------------
 Position sizing and capital allocation policies.
 """
+
 import numpy as np
 import pandas as pd
 
@@ -23,9 +24,9 @@ def calculate_position_size(
     """
     del amihud, portfolio_equity  # PLACEHOLDER: Unused pending real volume/depth liquidity policy
 
-    viable_mask = (
-        lower_bound_return_pct >= MODEL_CONFIG["Q10_FLOOR_PCT"]
-    ) & (expected_roi_pct > 0.0)
+    viable_mask = (lower_bound_return_pct >= MODEL_CONFIG["Q10_FLOOR_PCT"]) & (
+        expected_roi_pct > 0.0
+    )
 
     # PLACEHOLDER: Explicit fixed dollar/unit cap (replaced inert Kelly math)
     raw_units = np.floor(max_position_dollars / np.maximum(basis, 0.01))

@@ -25,11 +25,15 @@ def create_production_snapshot():
     legacy_full_db = BASE_DIR / "data" / "mtg_prices_full.duckdb"
     if legacy_full_db.exists():
         if HAS_RICH:
-            console.print(f"[bold yellow]Warning:[/bold yellow] Found stale {legacy_full_db.name}. Ignoring it to prevent schema regression.")
-    
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] Found stale {legacy_full_db.name}. Ignoring it to prevent schema regression."
+            )
+
     if not PROD_DB.exists():
         if HAS_RICH:
-            console.print(f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]")
+            console.print(
+                f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]"
+            )
         else:
             print(f"Active database not found at {PROD_DB}", file=sys.stderr)
         sys.exit(1)
@@ -64,61 +68,50 @@ def create_production_snapshot():
     try:
         conn.execute(f"ATTACH '{TEMP_SRC_DB.as_posix()}' AS src (READ_ONLY);")
 
-        conn.execute(
-            """
+        conn.execute("""
             CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
             CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
             CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
             CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
-        """
-        )
+        """)
 
         # Keep ALL active arbitrage opportunities
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE fact_arbitrage_opportunities AS
             SELECT * EXCLUDE (finish), CAST(finish AS VARCHAR)::price_finish AS finish 
             FROM src.fact_arbitrage_opportunities;
-        """
-        )
+        """)
 
         # PLACEHOLDER: 700 EDHREC cap meets <50MB budget (note: scan_buyer_dips.py defaults to 1500)
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TEMP TABLE target_tracked_cards AS
             SELECT DISTINCT uuid FROM src.fact_arbitrage_opportunities
             UNION
             SELECT uuid FROM src.dim_cards
             WHERE (edhrec_rank IS NOT NULL AND edhrec_rank <= 700)
                OR is_reserved = true;
-        """
-        )
+        """)
 
         # Features: Retain 60 days so frontend 60D history and 20D Bollinger Bands render intact
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE fact_card_features AS
             SELECT f.* EXCLUDE (finish), CAST(f.finish AS VARCHAR)::price_finish AS finish 
             FROM src.fact_card_features f
             JOIN target_tracked_cards t ON f.uuid = t.uuid
             WHERE f.price_date >= (SELECT MAX(price_date) - INTERVAL 60 DAY FROM src.fact_card_features);
-        """
-        )
+        """)
 
         # Retain recent training/backtest slice so /api/v1/backtest and run_pipeline checks remain valid
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE fact_training_dataset AS
             SELECT tr.* EXCLUDE (finish), CAST(tr.finish AS VARCHAR)::price_finish AS finish
             FROM src.fact_training_dataset tr
             JOIN target_tracked_cards t ON tr.uuid = t.uuid
             WHERE tr.price_date >= (SELECT MAX(price_date) - INTERVAL 30 DAY FROM src.fact_training_dataset);
-        """
-        )
+        """)
 
         # Enriched Dimension Table (tracked cards only)
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE dim_cards AS
             SELECT
                 d.uuid, d.name, d.set_code, d.collector_number, d.rarity,
@@ -127,12 +120,10 @@ def create_production_snapshot():
             FROM src.dim_cards d
             WHERE d.is_online_only = false
               AND d.uuid IN (SELECT DISTINCT uuid FROM target_tracked_cards);
-        """
-        )
+        """)
 
         # Latest Retail Price points for fast lookups
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE fact_prices AS
             WITH ranked_prices AS (
                 SELECT
@@ -150,13 +141,14 @@ def create_production_snapshot():
             SELECT uuid, format, vendor, list_type, finish, price_date, price
             FROM ranked_prices
             WHERE rn = 1;
-        """
-        )
+        """)
 
         # Lean essential indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_name ON dim_cards(name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dim_cards_uuid ON dim_cards(uuid);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);"
+        )
 
         conn.execute("CHECKPOINT;")
         conn.execute("VACUUM;")
@@ -180,9 +172,7 @@ def create_production_snapshot():
             table.add_column("Size", justify="right", style="cyan")
             table.add_column("Compression Delta", justify="right", style="bold green")
             reduction_pct = (
-                ((initial_size_mb - size_mb) / initial_size_mb) * 100
-                if initial_size_mb > 0
-                else 0
+                ((initial_size_mb - size_mb) / initial_size_mb) * 100 if initial_size_mb > 0 else 0
             )
             table.add_row("Source Snapshot", f"{initial_size_mb:.2f} MB", "—")
             table.add_row(

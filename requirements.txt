@@ -3,7 +3,7 @@ ijson
 pandas
 numpy
 duckdb
-tqdm
+tqdm    
 python-dotenv
 requests
 
@@ -20,3 +20,4 @@ pydantic
 pytest
 black
 rich
+httpx2

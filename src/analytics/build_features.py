@@ -24,14 +24,16 @@ try:
     from rich.table import Table
     from rich.text import Text
     from rich import box
+
     HAS_RICH = True
     console = Console()
 except ImportError:
     HAS_RICH = False
 
+
 def build_analytical_features(db_path: Path = DB_PATH):
     start_time = time.time()
-    
+
     if not db_path.exists():
         err_msg = f"Database not found at '{db_path}'. Run ETL (load_duckdb.py) first."
         if HAS_RICH:
@@ -44,38 +46,42 @@ def build_analytical_features(db_path: Path = DB_PATH):
         header_grid = Table.grid(expand=True)
         header_grid.add_column(justify="left", ratio=3)
         header_grid.add_column(justify="right", ratio=2)
-        
+
         title = Text()
         title.append("TIAMAT QUANT TERMINAL", style="bold cyan")
         title.append(" │ ", style="dim white")
         title.append("Scale-Invariant Feature Engineering", style="bold white")
-        title.append("\nDuckDB OLAP • Tick-Size Robust Volatility • Config-Driven Regimes", style="dim italic")
-        
+        title.append(
+            "\nDuckDB OLAP • Tick-Size Robust Volatility • Config-Driven Regimes",
+            style="dim italic",
+        )
+
         meta = Text()
         meta.append(f"Target DB: {db_path.name}\n", style="dim cyan")
         meta.append("Status: [bold green]Processing SQL Window Frames[/bold green]")
-        
+
         header_grid.add_row(title, meta)
         console.print(Panel(header_grid, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
         console.print()
 
-    conn = duckdb.connect(str(db_path), config={
-        'threads': '4',
-        'max_memory': '2GB',
-        'preserve_insertion_order': 'false'
-    })
-    
+    conn = duckdb.connect(
+        str(db_path),
+        config={"threads": "4", "max_memory": "2GB", "preserve_insertion_order": "false"},
+    )
+
     cfg = MICROSTRUCTURE_CONFIG
     fee = FEE_CONFIG
 
     try:
-        if HAS_RICH: 
-            console.print("[bold cyan][1/3] Building `fact_card_features` (Scale-Invariant Derivatives)...[/bold cyan]")
-        else: 
+        if HAS_RICH:
+            console.print(
+                "[bold cyan][1/3] Building `fact_card_features` (Scale-Invariant Derivatives)...[/bold cyan]"
+            )
+        else:
             print("[1/3] Building `fact_card_features`...")
 
         conn.execute("DROP TABLE IF EXISTS fact_card_features")
-        
+
         # Inject centralized configuration into SQL execution
         conn.execute(f"""
             CREATE TABLE fact_card_features AS
@@ -204,14 +210,16 @@ def build_analytical_features(db_path: Path = DB_PATH):
             FROM enriched_market e
             LEFT JOIN dim_cards d ON e.uuid = d.uuid;
         """)
-        
-        feat_count = conn.execute("SELECT COUNT(*) FROM fact_card_features").fetchone()[0]
-        if HAS_RICH: 
-            console.print(f"  [bold green]✓ `fact_card_features` populated:[/bold green] [white]{feat_count:,}[/white] feature vectors")
 
-        if HAS_RICH: 
+        feat_count = conn.execute("SELECT COUNT(*) FROM fact_card_features").fetchone()[0]
+        if HAS_RICH:
+            console.print(
+                f"  [bold green]✓ `fact_card_features` populated:[/bold green] [white]{feat_count:,}[/white] feature vectors"
+            )
+
+        if HAS_RICH:
             console.print("[bold cyan][2/3] Building `fact_training_dataset`...[/bold cyan]")
-        else: 
+        else:
             print("[2/3] Building `fact_training_dataset`...")
 
         conn.execute("DROP TABLE IF EXISTS fact_training_dataset")
@@ -232,14 +240,16 @@ def build_analytical_features(db_path: Path = DB_PATH):
             FROM forward_targets
             WHERE future_price IS NOT NULL;
         """)
-        
-        train_count = conn.execute("SELECT COUNT(*) FROM fact_training_dataset").fetchone()[0]
-        if HAS_RICH: 
-            console.print(f"  [bold green]✓ `fact_training_dataset` populated:[/bold green] [white]{train_count:,}[/white] labeled instances")
 
-        if HAS_RICH: 
+        train_count = conn.execute("SELECT COUNT(*) FROM fact_training_dataset").fetchone()[0]
+        if HAS_RICH:
+            console.print(
+                f"  [bold green]✓ `fact_training_dataset` populated:[/bold green] [white]{train_count:,}[/white] labeled instances"
+            )
+
+        if HAS_RICH:
             console.print("[bold cyan][3/3] Building `fact_arbitrage_opportunities`...[/bold cyan]")
-        else: 
+        else:
             print("[3/3] Building `fact_arbitrage_opportunities`...")
 
         conn.execute("DROP TABLE IF EXISTS fact_arbitrage_opportunities")
@@ -281,20 +291,32 @@ def build_analytical_features(db_path: Path = DB_PATH):
                 ROUND(((ck_store_credit_payout - total_acquisition_basis) / NULLIF(total_acquisition_basis, 0)) * 100.0, 2) AS spread_pct
             FROM asof_aligned WHERE ck_store_credit_payout > total_acquisition_basis;
         """)
-        
-        arb_count = conn.execute("SELECT COUNT(*) FROM fact_arbitrage_opportunities").fetchone()[0]
-        if HAS_RICH: 
-            console.print(f"  [bold green]✓ `fact_arbitrage_opportunities` populated:[/bold green] [white]{arb_count:,}[/white] locked spatial spreads\n")
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_features_lookup ON fact_card_features(uuid, finish);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_features_regime ON fact_card_features(microstructure_regime);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_training_date ON fact_training_dataset(price_date);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);")
+        arb_count = conn.execute("SELECT COUNT(*) FROM fact_arbitrage_opportunities").fetchone()[0]
+        if HAS_RICH:
+            console.print(
+                f"  [bold green]✓ `fact_arbitrage_opportunities` populated:[/bold green] [white]{arb_count:,}[/white] locked spatial spreads\n"
+            )
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_features_lookup ON fact_card_features(uuid, finish);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_features_regime ON fact_card_features(microstructure_regime);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_date ON fact_training_dataset(price_date);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_arb_spread ON fact_arbitrage_opportunities(price_spread DESC);"
+        )
         conn.execute("CHECKPOINT; VACUUM;")
-        
+
         elapsed = time.time() - start_time
         if HAS_RICH:
-            summary = Table(box=box.ROUNDED, border_style="green", show_header=True, header_style="bold green")
+            summary = Table(
+                box=box.ROUNDED, border_style="green", show_header=True, header_style="bold green"
+            )
             summary.add_column("Analytical Store", style="bold white")
             summary.add_column("Rows Generated", justify="right", style="cyan")
             summary.add_column("Derivation SLA", justify="right", style="bold green")
@@ -302,12 +324,19 @@ def build_analytical_features(db_path: Path = DB_PATH):
             summary.add_row("Training Target Set", f"{train_count:,}", "Derivative Enriched")
             summary.add_row("Spatial Arbitrage Store", f"{arb_count:,}", "ASOF Aligned")
             summary.add_row("Total Pipeline Latency", f"{elapsed:.2f}s", "Sub-120s SLA Met")
-            console.print(Panel(summary, title="[bold green]Feature Engineering Complete[/bold green]", box=box.ROUNDED))
+            console.print(
+                Panel(
+                    summary,
+                    title="[bold green]Feature Engineering Complete[/bold green]",
+                    box=box.ROUNDED,
+                )
+            )
         else:
             print(f"Feature engineering pipeline complete in {elapsed:.2f}s.\n")
-            
+
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     build_analytical_features(DB_PATH)
