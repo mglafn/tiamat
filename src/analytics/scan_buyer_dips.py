@@ -6,31 +6,14 @@ Analyzes acquisition value, moving-average discounts, floor stabilization,
 and pre-spike breakout warnings for players with zero intention of reselling.
 """
 
-import sys
 import argparse
 from pathlib import Path
+import sys
 import duckdb
-import numpy as np
-import pandas as pd
-import joblib
 
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-    from rich.text import Text
-    from rich import box
-
-    HAS_RICH = True
-    console = Console()
-except ImportError:
-    HAS_RICH = False
-
-BASE_DIR = Path(__file__).resolve().parents[2]
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-from src.config import DB_PATH, MODEL_PATH, FEE_CONFIG, MODEL_CONFIG
+from src.analytics.inference import predict_buyer_breakout, try_load_forecast_bundle
+from src.cli.reports import render_buyer_report
+from src.config import DB_PATH, FEE_CONFIG, MODEL_CONFIG, MODEL_PATH
 from src.pricing.fees import landed_basis_series
 
 
@@ -49,13 +32,12 @@ def scan_buyer_dips(
         return
 
     # 1. Connect to DuckDB & pull feature store snapshot
-    conn = duckdb.connect(str(db_path), read_only=True)
     reserved_clause = "AND d.is_reserved = true" if reserved_only else ""
-    rank_clause = (
-        f"AND (d.edhrec_rank IS NOT NULL AND d.edhrec_rank <= {max_edhrec_rank})"
-        if max_edhrec_rank > 0
-        else ""
-    )
+    params: list[object] = [float(min_price)]
+    rank_clause = ""
+    if max_edhrec_rank > 0:
+        rank_clause = "AND (d.edhrec_rank IS NOT NULL AND d.edhrec_rank <= ?)"
+        params.append(int(max_edhrec_rank))
 
     query = f"""
         WITH latest_snapshot AS (
@@ -75,7 +57,7 @@ def scan_buyer_dips(
                 d.rarity
             FROM fact_card_features f
             LEFT JOIN dim_cards d ON f.uuid = d.uuid
-            WHERE f.current_price >= {min_price}
+            WHERE f.current_price >= ?
               {reserved_clause}
               {rank_clause}
             QUALIFY ROW_NUMBER() OVER(PARTITION BY f.uuid, f.finish ORDER BY f.price_date DESC) = 1
@@ -83,8 +65,11 @@ def scan_buyer_dips(
         SELECT * FROM latest_snapshot
         WHERE sma_30 IS NOT NULL AND sma_30 > 0;
     """
-    df = conn.execute(query).fetchdf()
-    conn.close()
+    conn = duckdb.connect(str(db_path), read_only=True)
+    try:
+        df = conn.execute(query, params).fetchdf()
+    finally:
+        conn.close()
 
     if len(df) == 0:
         print("No cards matched the requested staple criteria.", file=sys.stderr)
@@ -98,31 +83,18 @@ def scan_buyer_dips(
     )
 
     # 3. Model Inference (Pre-Spike Alerts)
-
     df["move_prob"] = 0.0
     df["pred_spike_pct"] = 0.0
     prob_threshold = 0.40
 
-    if model_path.exists():
-        try:
-            artifact = joblib.load(model_path)
-            q_models = artifact.get("quantile_models", {})
-            calibrator = artifact.get("isotonic_calibrator")
-            feature_cols = artifact.get("feature_cols", [])
-            prob_threshold = artifact.get("metrics", {}).get(
-                "tau_buyer_radar", artifact.get("metrics", {}).get("prob_threshold", 0.40)
-            )
-
-            if all(c in df.columns for c in feature_cols):
-                X = df[feature_cols].fillna(0.0)
-                if q_models and calibrator and 0.90 in q_models:
-                    preds_q90 = q_models[0.90].predict(X)
-                    if 0.50 in q_models:
-                        preds_q90 = np.maximum(preds_q90, q_models[0.50].predict(X))
-                    df["move_prob"] = calibrator.transform(preds_q90)
-                    df["pred_spike_pct"] = preds_q90
-        except Exception:
-            pass  # Fall back gracefully to pure rule-based dip detection
+    bundle = try_load_forecast_bundle(model_path)
+    if bundle is not None:
+        prob_threshold = bundle.tau_buyer_radar
+        if all(c in df.columns for c in bundle.feature_cols):
+            X = df[list(bundle.feature_cols)].fillna(0.0)
+            move_prob, pred_q90 = predict_buyer_breakout(bundle, X)
+            df["move_prob"] = move_prob
+            df["pred_spike_pct"] = pred_q90
 
     # 4. Classify Market States (aligned with verify_buyer_dips.py regimes)
     # State A: Local Floor Confirmed (Scale-Invariant Deceleration + SMA discount)
@@ -146,145 +118,6 @@ def scan_buyer_dips(
     render_buyer_report(
         df, floor_df, breakout_df, knife_df, min_discount_pct, prob_threshold, top_n
     )
-
-
-def render_buyer_report(total_df, floor_df, breakout_df, knife_df, min_discount, tau, top_n):
-    if not HAS_RICH:
-        print(f"\n--- TIAMAT BUYER RADAR (Universe: {len(total_df):,} staples) ---")
-        print(
-            f"Confirmed Floors: {len(floor_df)} | Pre-Spike Breakouts: {len(breakout_df)} | Falling Knives: {len(knife_df)}"
-        )
-        return
-
-    # Header Panel
-    header = Table.grid(expand=True)
-    header.add_column(justify="left", ratio=3)
-    header.add_column(justify="right", ratio=2)
-
-    title = Text()
-    title.append("TIAMAT QUANT TERMINAL", style="bold cyan")
-    title.append(" │ ", style="dim white")
-    title.append("Staple Floor & Dip Accumulator", style="bold green")
-    title.append(
-        "\nDeckbuilder Acquisition Radar • No Resale Friction • Mean-Reversion Timing",
-        style="dim italic",
-    )
-
-    meta = Text()
-    meta.append(f"Evaluated Staples: {len(total_df):,} SKUs\n", style="dim white")
-    meta.append("Acquisition Drag: [bold green]0% Seller Fee (Direct Buy Mode)[/bold green]")
-    header.add_row(title, meta)
-    console.print(Panel(header, box=box.ROUNDED, border_style="green", padding=(0, 1)))
-    console.print()
-
-    # Section 1: Confirmed Local Floors
-    if len(floor_df) > 0:
-        table_floor = Table(
-            title=f"[bold green]1. CONFIRMED LOCAL FLOORS (Bleed Stopped • Ready to Buy for Decks)[/bold green]",
-            box=box.ROUNDED,
-            border_style="bright_black",
-            header_style="bold green",
-            expand=True,
-        )
-        table_floor.add_column("Card Name", style="bold white", max_width=24, overflow="ellipsis")
-        table_floor.add_column("Set", justify="center", style="cyan")
-        table_floor.add_column("Finish", justify="center", style="yellow")
-        table_floor.add_column("EDH Rank", justify="center", style="dim")
-        table_floor.add_column("Current Ask", justify="right")
-        table_floor.add_column("Landed Cost", justify="right", style="dim")
-        table_floor.add_column("30D Baseline", justify="right", style="cyan")
-        table_floor.add_column("Dip Discount", justify="right", style="bold green")
-        table_floor.add_column("Dollar Savings", justify="right", style="bold green")
-        table_floor.add_column("3D Velocity", justify="right", style="dim")
-
-        for _, r in floor_df.iterrows():
-            table_floor.add_row(
-                r["name"],
-                r["set_code"],
-                r["finish"].upper(),
-                f"#{int(r['edhrec_rank']):,}" if pd.notna(r["edhrec_rank"]) else "—",
-                f"${r['current_price']:.2f}",
-                f"${r['buyer_landed_cost']:.2f}",
-                f"${r['sma_30']:.2f}",
-                f"-{r['discount_sma30_pct']:.1f}%",
-                f"+${r['dollar_savings']:.2f}",
-                f"{r['price_decay_velocity_3d']:+.2f}%/d",
-            )
-        console.print(table_floor)
-        console.print()
-    else:
-        console.print(
-            f"[dim yellow]ℹ No active staples have stabilized at >= {min_discount:.1f}% discount today.[/dim yellow]\n"
-        )
-
-    # Section 2: Pre-Spike Breakout Alerts
-    if len(breakout_df) > 0:
-        table_breakout = Table(
-            title=f"[bold yellow]2. PRE-SPIKE BREAKOUT ALERTS (Buy Immediately • High Probability of Markup)[/bold yellow]",
-            box=box.ROUNDED,
-            border_style="bright_black",
-            header_style="bold yellow",
-            expand=True,
-        )
-        table_breakout.add_column(
-            "Card Name", style="bold white", max_width=24, overflow="ellipsis"
-        )
-        table_breakout.add_column("Set", justify="center", style="cyan")
-        table_breakout.add_column("Finish", justify="center", style="yellow")
-        table_breakout.add_column("Current Price", justify="right")
-        table_breakout.add_column("Breakout Prob (P)", justify="right", style="bold yellow")
-        table_breakout.add_column("Predicted Spike", justify="right", style="bold green")
-        table_breakout.add_column("Projected 7D Price", justify="right", style="cyan")
-        table_breakout.add_column("Action Directive", style="bold white")
-
-        for _, r in breakout_df.iterrows():
-            proj_price = r["current_price"] * (1.0 + r["pred_spike_pct"] / 100.0)
-            table_breakout.add_row(
-                r["name"],
-                r["set_code"],
-                r["finish"].upper(),
-                f"${r['current_price']:.2f}",
-                f"{r['move_prob']:.1%}",
-                f"+{r['pred_spike_pct']:.1f}%",
-                f"${proj_price:.2f}",
-                "[bold red]BUY BEFORE SPIKE[/bold red]",
-            )
-        console.print(table_breakout)
-        console.print()
-    else:
-        console.print(
-            "[dim green]✔ No imminent buyout spikes detected across tracked staple universe.[/dim green]\n"
-        )
-
-    # Section 3: Falling Knife Warning
-    if len(knife_df) > 0:
-        table_knife = Table(
-            title=f"[bold magenta]3. FALLING KNIFE VETO (Patience Shield • Bleed Still Accelerating)[/bold magenta]",
-            box=box.ROUNDED,
-            border_style="bright_black",
-            header_style="bold magenta",
-            expand=True,
-        )
-        table_knife.add_column("Card Name", style="bold white", max_width=24, overflow="ellipsis")
-        table_knife.add_column("Set", justify="center", style="cyan")
-        table_knife.add_column("Finish", justify="center", style="yellow")
-        table_knife.add_column("Current Ask", justify="right")
-        table_knife.add_column("Discount vs 30D", justify="right", style="magenta")
-        table_knife.add_column("Decay Velocity", justify="right", style="bold red")
-        table_knife.add_column("Advisory Recommendation", style="italic dim")
-
-        for _, r in knife_df.iterrows():
-            table_knife.add_row(
-                r["name"],
-                r["set_code"],
-                r["finish"].upper(),
-                f"${r['current_price']:.2f}",
-                f"-{r['discount_sma30_pct']:.1f}%",
-                f"{r['price_decay_velocity_3d']:.2f}%/d",
-                "DO NOT BUY YET — Bleed active",
-            )
-        console.print(table_knife)
-        console.print()
 
 
 def main():

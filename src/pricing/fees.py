@@ -88,6 +88,11 @@ def calculate_direct_payout_series(
 ) -> Union[pd.Series, np.ndarray]:
     """
     Vectorized TCGplayer Direct payout matching calculate_direct_payout to the exact cent.
+
+    Fixed-point integer scaling avoids binary float drift under Banker's rounding:
+      - *_e4  = USD or rate scaled by 10^4 ($0.0001 / 0.01% precision)
+      - *_e8  = price_e4 * rate_e4 (10^8)
+      - *_e12 = price_e4 * (1 + tax_e4) * rate_e4 (10^12); divide by 10^10 -> integer cents
     """
     is_series = isinstance(prices, pd.Series)
     index = prices.index if is_series else None
@@ -192,3 +197,22 @@ def landed_basis_series(
 def ck_credit_payout(ck_cash_price: Union[float, pd.Series, np.ndarray]):
     """Card Kingdom Store Credit payout (+30% bonus multiplier)."""
     return ck_cash_price * FEE_CONFIG["STORE_CREDIT_MULTIPLIER"]
+
+
+def spatial_landed_basis_sql(price_expr: str) -> str:
+    """SQL expression for spatial CK landed acquisition basis derived from FEE_CONFIG."""
+    tax_mult = 1.0 + FEE_CONFIG["DEFAULT_TAX_RATE"]
+    thresh = FEE_CONFIG["INBOUND_POSTAGE_THRESHOLD_USD"]
+    low_post = FEE_CONFIG["INBOUND_POSTAGE_LOW_USD"]
+    high_post = FEE_CONFIG["INBOUND_POSTAGE_HIGH_USD"]
+    freight = FEE_CONFIG["OUTBOUND_BATCH_FREIGHT_USD"]
+    return (
+        f"({price_expr} * {tax_mult} + "
+        f"CASE WHEN {price_expr} < {thresh} THEN {low_post} ELSE {high_post} END + "
+        f"{freight})"
+    )
+
+
+def ck_credit_payout_sql(price_expr: str) -> str:
+    """SQL expression for Card Kingdom store credit payout derived from FEE_CONFIG."""
+    return f"({price_expr} * {FEE_CONFIG['STORE_CREDIT_MULTIPLIER']})"

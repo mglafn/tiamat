@@ -1,54 +1,36 @@
 import os
-import sys
 import shutil
-from pathlib import Path
+import sys
 import duckdb
 
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich import box
+from src.cli.console import HAS_RICH, Table, box, console, print_banner, print_msg
+from src.config import DB_PATH, LEGACY_FULL_DB_PATH, PRUNE_TEMP_DB_PATH
+from src.etl.schema import PRICE_ENUM_DDL
 
-    HAS_RICH = True
-    console = Console()
-except ImportError:
-    HAS_RICH = False
-
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-PROD_DB = BASE_DIR / "data" / "mtg_prices.duckdb"
-TEMP_SRC_DB = BASE_DIR / "data" / "mtg_prices_unpruned_tmp.duckdb"
+PROD_DB = DB_PATH
+TEMP_SRC_DB = PRUNE_TEMP_DB_PATH
 
 
 def create_production_snapshot():
-    # Detect if there's a stale FULL_DB causing issues and warn about it
-    legacy_full_db = BASE_DIR / "data" / "mtg_prices_full.duckdb"
-    if legacy_full_db.exists():
-        if HAS_RICH:
-            console.print(
-                f"[bold yellow]Warning:[/bold yellow] Found stale {legacy_full_db.name}. Ignoring it to prevent schema regression."
-            )
+    if LEGACY_FULL_DB_PATH.exists():
+        print_msg(
+            f"[bold yellow]Warning:[/bold yellow] Found stale {LEGACY_FULL_DB_PATH.name}. Ignoring it to prevent schema regression.",
+            f"Warning: Found stale {LEGACY_FULL_DB_PATH.name}. Ignoring it.",
+        )
 
     if not PROD_DB.exists():
-        if HAS_RICH:
-            console.print(
-                f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]"
-            )
-        else:
-            print(f"Active database not found at {PROD_DB}", file=sys.stderr)
+        print_msg(
+            f"[bold red]Error:[/bold red] Active database not found at [yellow]{PROD_DB}[/yellow]",
+            f"Active database not found at {PROD_DB}",
+            err=True,
+        )
         sys.exit(1)
 
     initial_size_mb = PROD_DB.stat().st_size / (1024 * 1024)
-
-    if HAS_RICH:
-        console.print(
-            Panel(
-                f"[bold white]DuckDB Snapshot Pruning Engine (<50MB Budget Target)[/bold white]\n"
-                f"[dim]Source: {PROD_DB} ({initial_size_mb:.2f} MB)[/dim]",
-                box=box.ROUNDED,
-                border_style="cyan",
-            )
-        )
+    print_banner(
+        "DuckDB Snapshot Pruning Engine (<50MB Budget Target)",
+        f"Source: {PROD_DB} ({initial_size_mb:.2f} MB)",
+    )
 
     # 1. Safely move the active DB to a temporary source file
     if TEMP_SRC_DB.exists():
@@ -67,13 +49,7 @@ def create_production_snapshot():
 
     try:
         conn.execute(f"ATTACH '{TEMP_SRC_DB.as_posix()}' AS src (READ_ONLY);")
-
-        conn.execute("""
-            CREATE OR REPLACE TYPE price_format AS ENUM ('paper', 'mtgo');
-            CREATE OR REPLACE TYPE price_vendor AS ENUM ('tcgplayer', 'cardkingdom', 'cardmarket', 'cardsphere', 'starcitygames', 'cardhoarder', 'manapool');
-            CREATE OR REPLACE TYPE price_list_type AS ENUM ('retail', 'buylist');
-            CREATE OR REPLACE TYPE price_finish AS ENUM ('normal', 'foil', 'etched');
-        """)
+        conn.execute(PRICE_ENUM_DDL)
 
         # Keep ALL active arbitrage opportunities
         conn.execute("""

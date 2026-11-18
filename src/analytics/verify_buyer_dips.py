@@ -6,31 +6,16 @@ PLACEHOLDER: Evaluates static holdout predictions and SQL regime slices
 (does not retrain quantile models across CPCV folds).
 """
 
-import sys
 import itertools
 from pathlib import Path
+import sys
 import duckdb
 import numpy as np
 import pandas as pd
-import joblib
 
-# Ensure repository root is on sys.path for direct script execution
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-from src.config import DB_PATH, MODEL_PATH, EVAL_CONFIG, MODEL_CONFIG, FEATURE_COLS
-
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-    from rich import box
-
-    HAS_RICH = True
-    console = Console()
-except ImportError:
-    HAS_RICH = False
+from src.analytics.inference import predict_buyer_breakout, try_load_forecast_bundle
+from src.cli.reports import render_cpcv_scorecard
+from src.config import DB_PATH, EVAL_CONFIG, FEATURE_COLS, MODEL_CONFIG, MODEL_PATH
 
 
 class PurgedGroupTimeSeriesSplitter:
@@ -105,7 +90,7 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     except Exception as e:
         conn.close()
         print(f"\n[Database Query Error]: {e}")
-        print("Please ensure `python src/analytics/build_features.py` has finished executing.\n")
+        print("Please ensure `python -m src.analytics.build_features` has finished executing.\n")
         return
 
     conn.close()
@@ -117,21 +102,9 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     df["price_date"] = pd.to_datetime(df["price_date"])
     cfg = EVAL_CONFIG
 
-    buyer_radar_available = False
-    oos_cutoff = None
-    if model_path.exists():
-        try:
-            artifact = joblib.load(model_path)
-            q_models = artifact.get("quantile_models")
-            calibrator = artifact.get("isotonic_calibrator")
-            tau_buyer = artifact.get("optimal_tau_buyer", 0.40)
-            split_date = artifact.get("metrics", {}).get("split_date")
-            oos_cutoff = pd.to_datetime(split_date) if split_date else None
-
-            if q_models and calibrator and 0.90 in q_models:
-                buyer_radar_available = True
-        except Exception:
-            buyer_radar_available = False
+    bundle = try_load_forecast_bundle(model_path)
+    buyer_radar_available = bundle is not None and bundle.has_buyer_radar
+    oos_cutoff = pd.to_datetime(bundle.split_date) if (bundle and bundle.split_date) else None
 
     splitter = PurgedGroupTimeSeriesSplitter(
         n_groups=cfg["CPCV_N_GROUPS"],
@@ -144,7 +117,7 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
     total_radar_alerts, radar_spikes, radar_returns = 0, 0, []
     seen_dates = set()
 
-    for _, (_, test_idx) in enumerate(splitter.split(df, "price_date")):
+    for _, test_idx in splitter.split(df, "price_date"):
         test_df = df.iloc[test_idx].copy()
         if len(test_df) == 0:
             continue
@@ -170,17 +143,14 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
         knife_returns.extend(knives["target_return_7d_pct"].tolist())
 
         # Signal 3: Buyer Radar Pre-Spike Breakout (strictly OOS >= split_date to prevent training/calib leakage)
-        if buyer_radar_available:
+        if buyer_radar_available and bundle is not None:
             oos_df = (
                 test_df[test_df["price_date"] >= oos_cutoff] if oos_cutoff is not None else test_df
             )
             if len(oos_df) > 0:
-                X_test_sub = oos_df[FEATURE_COLS].fillna(0.0)
-                preds_q90 = q_models[0.90].predict(X_test_sub)
-                if 0.50 in q_models:
-                    preds_q90 = np.maximum(preds_q90, q_models[0.50].predict(X_test_sub))
-                calibrated_p = calibrator.transform(preds_q90)
-                spike_alerts = oos_df[calibrated_p >= tau_buyer]
+                X_test_sub = oos_df[list(bundle.feature_cols)].fillna(0.0)
+                calibrated_p, _ = predict_buyer_breakout(bundle, X_test_sub)
+                spike_alerts = oos_df[calibrated_p >= bundle.tau_buyer_radar]
                 total_radar_alerts += len(spike_alerts)
                 radar_spikes += int(
                     (
@@ -219,83 +189,22 @@ def run_cpcv_buyer_verification(db_path: Path = DB_PATH, model_path: Path = MODE
         else 0.0
     )
 
-    if not HAS_RICH:
-        print(f"CPCV Results across {len(df):,} instances:")
-        print(
-            f"Confirmed Floors: {total_floor_entries:,} (Acc: {floor_acc:.1f}%, Avg: {floor_avg:+.2f}%)"
-        )
-        print(
-            f"Knife Vetoes: {total_knife_vetoes:,} (Acc: {knife_acc:.1f}%, Avg: {knife_avg:+.2f}%)"
-        )
-        if total_radar_alerts > 0:
-            print(
-                f"Radar Alerts: {total_radar_alerts:,} (Acc: {radar_acc:.1f}%, Avg: {radar_avg:+.2f}%)"
-            )
-        print(f"Buyer Alpha: {buyer_alpha:.2f}% | DAR: {dar:.1f}% | FIR: {fir:.1f}%")
-        return
-
-    table = Table(
-        title="[bold white]COMBINATORIAL PURGED CROSS-VALIDATION (CPCV) SCORECARD[/bold white]",
-        box=box.ROUNDED,
-        header_style="bold cyan",
-        border_style="bright_black",
-        expand=True,
+    render_cpcv_scorecard(
+        total_instances=len(df),
+        total_floor_entries=total_floor_entries,
+        floor_acc=floor_acc,
+        floor_avg=floor_avg,
+        total_knife_vetoes=total_knife_vetoes,
+        knife_acc=knife_acc,
+        knife_avg=knife_avg,
+        total_radar_alerts=total_radar_alerts,
+        radar_acc=radar_acc,
+        radar_avg=radar_avg,
+        buyer_alpha=buyer_alpha,
+        dar=dar,
+        fir=fir,
+        cfg=cfg,
     )
-    table.add_column("Buyer Decision Signal", style="bold white")
-    table.add_column("Trigger Count", justify="right", style="cyan")
-    table.add_column("Ground Truth Target", style="dim")
-    table.add_column("Empirical Acc (%)", justify="right", style="bold green")
-    table.add_column("Avg 7D Realized Move", justify="right", style="bold yellow")
-
-    table.add_row(
-        "Confirmed Floor Entry",
-        f"{total_floor_entries:,}",
-        f"Card price held or bounced (Ret >= {cfg['SUPPORT_CUSHION_PCT']:.1f}%)",
-        f"{floor_acc:.1f}%",
-        f"{floor_avg:+.2f}%",
-    )
-    table.add_row(
-        "Falling Knife Veto (Wait)",
-        f"{total_knife_vetoes:,}",
-        "Card continued bleeding (Ret < 0.0%)",
-        f"{knife_acc:.1f}%",
-        f"{knife_avg:+.2f}%",
-    )
-    if total_radar_alerts > 0:
-        table.add_row(
-            "Buyer Radar Breakout Alert",
-            f"{total_radar_alerts:,}",
-            f"Card realized upward spike (Ret >= +{MODEL_CONFIG['SPIKE_THRESHOLD_PCT']:.1f}%)",
-            f"{radar_acc:.1f}%",
-            f"{radar_avg:+.2f}%",
-        )
-
-    score_panel = Table(box=box.ROUNDED, border_style="green", expand=True)
-    score_panel.add_column("Buyer Alpha (Savings vs 30D SMA)", justify="center", style="bold green")
-    score_panel.add_column(
-        f"Floor Integrity Rate (FIR >= {cfg['SUPPORT_CUSHION_PCT']}%)",
-        justify="center",
-        style="bold cyan",
-    )
-    score_panel.add_column(
-        f"Drawdown Avoidance Rate (DAR > {cfg['DRAWDOWN_TOLERANCE_PCT']}%)",
-        justify="center",
-        style="bold white",
-    )
-    score_panel.add_row(f"+{buyer_alpha:.2f}%", f"{fir:.1f}%", f"{dar:.1f}%")
-
-    console.print("\n")
-    console.print(table)
-    console.print()
-    console.print(
-        Panel(
-            score_panel,
-            title="[bold green]WHITE-PAPER SPECIFICATION PERFORMANCE METRICS[/bold green]",
-            box=box.ROUNDED,
-            border_style="green",
-        )
-    )
-    console.print()
 
 
 if __name__ == "__main__":

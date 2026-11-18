@@ -1,0 +1,1 @@
+"""FastAPI analytics microservice package."""
